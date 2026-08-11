@@ -11,9 +11,9 @@ Related: [classifier-options.md](classifier-options.md) · [datasets.md](dataset
 Two purposes, and the second is the one that compounds:
 
 1. **Immediate:** a field user photographs a plant and learns what it is and what it can be used for.
-2. **Strategic:** every capture becomes a geocoded, timestamped, human-validatable observation. Over a season this becomes the ground-truth dataset that the Sentinel-2 model cannot otherwise get — see [Why the metadata matters more than the photo](#why-the-metadata-matters-more-than-the-photo).
+2. **Strategic:** every capture becomes a geocoded, timestamped, human-validatable observation. Over a season this becomes a ground-truth dataset for retraining the classifier — and, if the satellite track is revived, for labelling imagery. See [Why the metadata matters more than the photo](#why-the-metadata-matters-more-than-the-photo).
 
-The app is a data collection instrument that happens to be useful to the person holding it. Design accordingly: the capture path must never block on the network, and the metadata must be complete enough to be a satellite label later.
+The app is a data collection instrument that happens to be useful to the person holding it. Design accordingly: the capture path must never block on the network, and the metadata must be complete enough to remain useful long after the capture.
 
 ## System overview
 
@@ -92,16 +92,16 @@ Upload via Background Sync where supported; fall back to a retry-on-app-open wit
 
 ## Why the metadata matters more than the photo
 
-For the satellite transfer path, an observation's value is almost entirely in its metadata quality. A perfectly-focused photo with no GPS accuracy figure is nearly worthless as a Sentinel-2 label; a mediocre photo with tight GPS and a mat-extent estimate is gold.
+An observation's long-term value is mostly in its metadata. A perfectly-focused photo with no location accuracy figure is far less useful than a mediocre photo with tight GPS and an extent estimate.
 
 **Capture from day one — retrofitting is impossible:**
 
 | Field | Why |
 |---|---|
 | `lat`, `lon` | Obviously |
-| **`accuracy_m`** | **Critical.** A ±50 m fix cannot label a 10 m Sentinel-2 pixel. Without this you cannot filter usable labels later. |
-| `captured_at` (UTC + offset) | Sentinel-2 revisit matching; phenology |
-| **`mat_extent`** | Point-in-middle-of-large-mat is a usable satellite label; point-at-edge is not. A three-way user prompt (isolated plant / patch / large mat) is enough. |
+| **`accuracy_m`** | **Critical.** Distinguishes an observation you can trust to a specific water body from one you cannot. Also the filter that decides which observations could ever serve as satellite labels. |
+| `captured_at` (UTC + offset) | Phenology; seasonal domain shift; satellite revisit matching if that track resumes |
+| **`mat_extent`** | Isolated plant / patch / large mat. Cheap for the user (a three-way prompt), and the difference between an observation that can anchor a coarse-resolution label and one that cannot. |
 | `species_pred`, `confidence`, `model_version` | Lets you re-evaluate old observations when the model changes |
 | `abstained` | Flags the review queue |
 | `device`, `app_version` | Debugging domain shift |

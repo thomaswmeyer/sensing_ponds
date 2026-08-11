@@ -1,102 +1,32 @@
-# Classifier Options for Water Hyacinth & Water Pollution Detection
+# Classifier Options: Floating Aquatic Plant Identification
 
-Status: scoping notes, validated against published literature (August 2026). No imagery source or ground truth confirmed yet — see [Open Questions](#open-questions). Claims sourced to papers are cited inline; claims without citations are engineering judgement and should be treated as such.
+Model choices for the on-device field-identification classifier. Validated against published literature (August 2026); claims sourced to papers are cited inline, claims without citations are engineering judgement.
+
+**Scope note:** this project previously included a Sentinel-2 satellite segmentation track (spectral indices, U-Net coverage mapping, water quality regression). That work has been removed to focus on the mobile classifier. It may be reintegrated later — the capture app deliberately records GPS accuracy and mat extent, which are only needed for satellite labelling. See [architecture.md](architecture.md#why-the-metadata-matters-more-than-the-photo).
 
 ## TL;DR
 
-- **Semantic segmentation is the primary approach.** Per-pixel labels directly yield the number you actually want to report: coverage in hectares / % of waterbody / change over time. U-Net variants reach up to 97% accuracy in hyacinth studies.
-- **Start with spectral indices, not deep learning.** NDVI and NDVI+FAI are the best-scoring indicators in head-to-head evaluation, and classical methods land in the same broad accuracy band as deep learning across the literature. A Sentinel-2 index pipeline gives a working coverage time series in days and doubles as a cheap label generator.
-- **Then train a U-Net** (`segmentation_models_pytorch`, EfficientNet-B0 encoder, 6–10 bands, Dice+BCE loss).
-- **Detection models are a live option, not just a drone fallback.** YOLOv11 and Faster R-CNN have been evaluated for hyacinth detection in remote sensing imagery. Boxes still don't give you coverage area directly — pick by what you need to report.
-
-## Sensor choice
-
-Sentinel-2 MSI is the most-used sensor in hyacinth monitoring at **35%** of studies, followed by Landsat 8 OLI at **26%** ([Water review, 2025](https://doi.org/10.3390/w17172573)). Its 10 m resolution is specifically credited with enabling hyacinth infestation and coverage estimation.
-
-**Multi-sensor fusion — especially Sentinel-2 + UAV — is a frequently applied pattern**, not an exotic one. If drone flights are possible at all, plan them as cross-scale validation for the satellite product rather than as a separate track.
-
-**Hyperspectral, 700–900 nm**, shows superior performance differentiating hyacinth from native vegetation. Relevant only if sensor budget is ever on the table.
-
-## Detection vs. segmentation
-
-| | Detection (YOLO, Faster R-CNN) | Semantic segmentation |
-|---|---|---|
-| Output | Bounding boxes | Per-pixel class |
-| Suits | Discrete countable objects | Amorphous regions, fuzzy edges |
-| Gives coverage area? | Only crudely | Directly |
-
-Hyacinth mats have fuzzy, irregular boundaries, so per-pixel is the better unit for coverage reporting. But detection is an active line of work here — **YOLOv11 vs Faster R-CNN has been evaluated specifically for hyacinth detection in remote sensing imagery** ([Research Square, 2025](https://www.researchsquare.com/article/rs-7323485/v1)). Choose on output requirements: coverage area → segmentation; counting or tracking discrete mats → detection.
-
-## Tier 1 — Spectral indices (do this first)
-
-Water hyacinth exhibits strong, distinguishable optical signals in **near-infrared and red-edge** wavelengths, which is what makes it detectable.
-
-| Index | Purpose |
-|---|---|
-| **NDWI / MNDWI** | Waterbody extent — but see the mixed-pixel warning below before masking with it |
-| **NDVI** | Floating vegetation. Highest-scoring single indicator |
-| **NDVI + FAI** | Best combined indicator |
-| **FAI** (Floating Algae Index) | Targets floating-material reflectance; complements NDVI's vegetation-vigour signal |
-
-A Lake Tana multi-sensor study tested 11 indicators and found **NDVI and NDVI+FAI scored highest** on environmental coherence ([Sci Reports, 2026](https://www.nature.com/articles/s41598-026-46912-0)). The indices are complementary by design: FAI targets floating-material reflectance, NDVI measures vegetation vigour, SAR captures surface roughness — each captures a different physical aspect of the same phenomenon.
-
-**Do this first.** Reported detection accuracies across statistical, ML and DL techniques span **74–98%**, with classical ML (RF, SVM, CART, KNN, naive Bayes) at 65–98% ([Water review, 2025](https://doi.org/10.3390/w17172573)). Deep learning is not a guaranteed win over a well-tuned index baseline — but you need the baseline to know.
-
-## Tier 2 — Segmentation models
-
-| Model | Use when |
-|---|---|
-| **U-Net** (ResNet/EfficientNet encoder) | **Default choice.** Directly validated on hyacinth: a Feb 2025 paper applies U-Net to multispectral hyacinth imagery ([Remote Sensing, 2025](https://doi.org/10.3390/rs17040689)); a 2025 RGB U-Net reports Dice 0.906 ± 0.04, IoU 0.831 ± 0.06 ([Sci Reports, 2025](https://www.nature.com/articles/s41598-025-34128-7)). `segmentation_models_pytorch` gives you this in ~20 lines and handles arbitrary channel counts. |
-| **ResU-Net / DeepLabV3** | Also validated on hyacinth — U-Net, ResU-Net and DeepLabV3 together reach up to **97%** mapping accuracy ([Water review, 2025](https://doi.org/10.3390/w17172573)). ResNet and DeepLabv3+ specifically shown effective for *Eichhornia crassipes*. |
-| **SegFormer** (HuggingFace) | Transformer, easy fine-tune. Good if label volume is decent. No hyacinth-specific validation found. |
-| **Prithvi-100M** (NASA/IBM) | ⚠️ **Speculative — no aquatic-vegetation track record found.** Documented downstream tasks are flood mapping, fire scars, LULC. The few-label appeal is real but unproven here. If trying it, use **TerraTorch** (current PyTorch Lightning fine-tuning framework), not the older `hls-foundation-os` repo. |
-| **SAM / SAM2** | Not a classifier. Use as a **labeling accelerator**: click a mat, get a mask, correct it. |
-
-## Tier 3 — Pollution specifically
-
-"Water pollution" is not one class. Decide which target is meant — these are **mostly regression against in-situ measurements, not classification**.
-
-| Target | Approach |
-|---|---|
-| Turbidity / sediment | Regression on red + NIR bands; well-established retrieval algorithms |
-| Chlorophyll-a / algal blooms | NDCI, or Sentinel-3 OLCI if the waterbody is large enough |
-| Surface films, oil | SAR (Sentinel-1) |
-| Floating debris | Optical + detector |
-| Effluent outfalls | Thermal (Landsat TIRS) for discharge plumes |
-
-If any in-situ water sampling data exists, it is the most valuable asset in the project and changes the design.
-
-## Pipeline design risk: mixed pixels and mask ordering
-
-This is a design constraint, not a caveat — it affects the order of operations.
-
-- **Sentinel-2's 10 m pixels produce *greater* mixed-pixel effects than Landsat's 30 m pixels** ([Sci Reports, 2026](https://www.nature.com/articles/s41598-026-46912-0)). Finer resolution is not uniformly better here.
-- **Dense hyacinth cover impedes correct detection of water body boundaries.** Water extraction accuracy is degraded by hyacinth presence, narrow river width, and water-level variation between periods.
-
-**Consequence:** the intuitive "mask the water with NDWI, then find vegetation inside the mask" ordering is self-defeating where infestation is heaviest — the hyacinth erases the very boundary you are masking on. Options: derive the waterbody mask from a low-infestation season and hold it fixed; use an external/static waterbody polygon; or segment water and hyacinth jointly as classes rather than sequentially.
-
-## Other practical concerns
-
-- **Labels are the bottleneck, not architecture.** A U-Net with 200 good masks beats a foundation model with 20 sloppy ones. Budget most effort here.
-- **Class imbalance** — hyacinth may be <1% of pixels. Use Dice or Focal loss, not plain cross-entropy.
-- **Clouds.** Sentinel-2 over tropical waterbodies is heavily cloud-affected. Needs SCL-band masking and probably compositing.
-- **Hyacinth vs. algal blooms is *the* named hard problem.** Algal and aquatic vegetation have similar spectral characteristics and are hard to separate, especially in turbid water — "the major focus of efforts using optical datasets has been to distinguish between hyacinth mats and algal blooms or other aquatic macrophytes." Beyond FAI, **phenological / multi-temporal analysis** is the established lever (cf. the MODIS vegetation presence frequency index). A single-date classifier will struggle where a time series succeeds.
-- **Other confusions**: Salvinia, Pistia, algal scum. Deep learning on aquatic plants is hard generally — complex growing environments, long phenological periods, high inter-species similarity, frequent occlusion.
-- **Don't just use RGB.** NIR and red-edge carry the separability. Most off-the-shelf pretrained weights are 3-channel, so the first conv layer needs inflating.
+- **MobileNetV3-Small**, four classes, ImageNet-pretrained, fine-tuned. 2.5M params, ~2 MB at INT8 — runs in a browser on a low-end Android phone.
+- **Not Ultralytics YOLO.** The `-cls` variants would work but carry AGPL-3.0 and offer no advantage over `timm`.
+- **Abstain is a first-class output.** A four-way softmax cannot say "none of these" unless you build that in.
+- **Augmentation targets the domain gap**, not volume — water colour, glare, phone cameras.
+- **The evaluation split matters more than the architecture.** See [Evaluation discipline](#evaluation-discipline).
 
 ## Existing datasets
 
 See **[datasets.md](datasets.md)** for full detail. Summary:
 
-- **[WaterHyacinth](https://www.sciencedirect.com/science/article/pii/S2352340923009320)** — 1,790 smartphone images, class labels only (no boxes/masks). Despite the name it is four *genera* of floating plants (hyacinth, water lettuce, duckweed, *Monochoria*), not four hyacinth species — i.e. exactly the allied-species discrimination task. Close-range RGB, will **not** transfer to Sentinel-2.
-- **[AqUavplant](https://pmc.ncbi.nlm.nih.gov/articles/PMC11661991/)** — 197 4K UAV images, 31 species, **with segmentation masks**. Contains hyacinth, *Pistia* and *Lemna*. Severely imbalanced; use as binary/coarse classes. Flown at 2.5 m, so near-macro rather than survey altitude.
-- **[iNaturalist / GBIF](https://www.gbif.org/dataset/50c9509d-22c7-4a22-a47d-8c48425ef4a7)** — bulk citizen-science observations, global coverage. The fix for WaterHyacinth's geographic narrowness. Search both *Eichhornia crassipes* and *Pontederia crassipes* (reclassified genus).
+- **[WaterHyacinth](https://www.sciencedirect.com/science/article/pii/S2352340923009320)** (Mendeley) — 1,790 smartphone images, class labels only. Despite the name it is four *genera* of floating plants, not four hyacinth species — i.e. exactly the allied-species discrimination task. **Only 10 capture days**, which is why the split strategy matters so much.
+- **[iNaturalist / GBIF](https://www.gbif.org/dataset/50c9509d-22c7-4a22-a47d-8c48425ef4a7)** — bulk citizen-science observations, global coverage. The fix for the Mendeley set's geographic narrowness, and the source of the held-out regional test set. Search both *Eichhornia crassipes* and *Pontederia crassipes* (reclassified genus).
+- **[AqUavplant](https://pmc.ncbi.nlm.nih.gov/articles/PMC11661991/)** — 197 4K UAV images with segmentation masks. Not currently used; relevant if coverage-fraction estimation is added.
 
-## Mobile field-identification track
+**Classes:** water hyacinth, water lettuce, duckweed, *Salvinia molesta*. *Monochoria korsakowii* — the Mendeley set's fourth class — was dropped: temperate East Asian, zero GBIF records in India or Sri Lanka, and only 2 capture days. *Salvinia* replaces it as a documented hyacinth confuser present in the deployment region.
 
-A separate deliverable from the satellite pipeline: on-device species ID from a phone photo, for field validation. Implementation in [`../src/train_mobile_classifier.py`](../src/train_mobile_classifier.py).
+## Model choice
 
-**Model: MobileNetV3-Small** (2.5M params, ~2 MB at INT8). Four visually distinct floating plants at 224×224 is an easy problem — the constraint is 1,790 images, not capacity. A larger model overfits sooner without helping.
+Implementation in [`../src/train_mobile_classifier.py`](../src/train_mobile_classifier.py).
+
+**MobileNetV3-Small** (2.5M params, ~2 MB at INT8). Four visually distinct floating plants at 224×224 is an easy problem — the constraint is data volume and diversity, not capacity. A larger model overfits sooner without helping.
 
 **Not Ultralytics `yolo*-cls`.** Those are genuine classifiers (no boxes), so they would work — but they are the YOLO backbone with a classification head, with none of what makes YOLO good (detection head, anchor-free assignment, NMS) in play. Comparable size, no advantage, and **AGPL-3.0** — a live risk for a distributed Android app. `timm`/`torchvision` are Apache-2.0/BSD.
 
@@ -104,7 +34,7 @@ A separate deliverable from the satellite pipeline: on-device species ID from a 
 
 ### Augmentation strategy
 
-**Augment for the domain gap, not for volume.** The dataset is two districts, three months, four phone cameras. Every transform should simulate something that differs in the field.
+**Augment for the domain gap, not for volume.** The Mendeley images are two districts, three months, four phone cameras, ten days. Every transform should simulate something that differs in the field.
 
 | Transform | Rationale |
 |---|---|
@@ -117,15 +47,19 @@ A separate deliverable from the satellite pipeline: on-device species ID from a 
 
 **Avoid:** heavy Cutout/random-erasing (can remove the swollen petiole — the key diagnostic structure); grayscale (colour is signal); aspect-distorting stretches.
 
-**Worth trying:** MixUp / CutMix. At 1,790 images they regularise well and produce soft labels, which helps the calibration needed for an abstain path.
+**In use:** MixUp. It regularises well at this data volume and produces soft labels, which damps the overconfidence that would otherwise break the abstain threshold.
 
 ### Evaluation discipline
 
-This outranks every architecture and augmentation choice:
+This outranks every architecture and augmentation choice.
 
-- **Split by location, not randomly.** Same-pond same-afternoon photos in both splits measure memorised ponds. Expect the honest number well below a random split's ~98%, and treat that gap as the real finding.
-- **Calibrate and add an abstain path.** A four-class softmax will confidently label a photo of a rock. If this advises anyone, "not sure" must be a valid output — confidence thresholding, or a fifth "other/unknown" class trained on negatives.
-- **Expect deployment shift beyond the held-out number**: different country, season, water conditions, camera, holding angle. Duckweed especially is a texture that varies with the water beneath it.
+**The test set is GBIF regional records (India + Sri Lanka), held out entirely.** Training uses Mendeley plus global GBIF. Rationale: the Mendeley images come from 10 capture days in two Bangladeshi districts, so *any* split of them measures pond recognition, not plant identification — even a strict date-level split leaves train and test one afternoon apart at the same site. Holding out regional records instead asks whether the model transfers to the deployment region.
+
+This reports a substantially lower number than a random split would. **That gap is the finding, not a problem to tune away.**
+
+- **Calibrate, then abstain.** Temperature scaling fitted on validation (never on test — that leaks), then the lowest confidence threshold reaching target precision. Both are exported in `model_config.json`; without them the client ships raw overconfident softmax.
+- **If no threshold reaches target precision, do not ship an auto-ID path.** The training script reports this explicitly rather than emitting a plausible-looking number.
+- **Expect deployment shift beyond the held-out number**: season, water conditions, camera, holding angle. Duckweed especially is a texture that varies with the water beneath it, and has only ~23 regional test images.
 
 ### Species → uses is a lookup table, not a model output
 
@@ -141,30 +75,24 @@ A naive species→uses mapping gets both wrong in ways that matter.
 
 ## Recommended stack
 
-- **Imagery:** Sentinel-2, ideally with UAV flights for cross-scale validation
-- **Baseline first:** NDVI + FAI thresholding — must be beaten before DL is justified
-- **Model:** `segmentation-models-pytorch` U-Net, EfficientNet-B0 encoder, 6–10 bands
-- **Loss:** Dice + BCE
-- **Labels:** bootstrapped from spectral-index thresholding, cleaned with SAM
-- **Data handling:** `rasterio` / `xarray` / `stackstac`, or Google Earth Engine to avoid managing tiles
-- **Multi-temporal from the start** — needed for the hyacinth/algae discrimination, not just for trend reporting
-- **Detection (YOLOv11 / Faster R-CNN):** if counting or tracking discrete mats is a requirement
+- **Model:** `timm` MobileNetV3-Small, ImageNet-pretrained, 224×224
+- **Loss:** soft cross-entropy with MixUp
+- **Calibration:** temperature scaling fitted on validation, threshold chosen for target precision
+- **Export:** ONNX → ONNX Runtime Web (browser) or TFLite via `onnx2tf`
+- **Fallback if INT8 degrades:** EfficientNet-Lite0
+
+Implementation: [`../src/train_mobile_classifier.py`](../src/train_mobile_classifier.py). Data setup: [getting-data.md](getting-data.md).
 
 ## Open questions
 
-1. **What imagery** is available or planned — Sentinel-2/Landsat, commercial (Planet, Maxar), or drone? Resolution drives everything else.
-2. **Any existing ground truth** — field surveys, water quality samples, hand-drawn polygons?
-3. **What is the reported output** — coverage area, mat counts, or change detection? This decides segmentation vs. detection.
+1. **Is four classes enough for the deployment region?** The model knows hyacinth, water lettuce, duckweed and *Salvinia*. A common fifth floating plant in Tamil Nadu would push the abstain rate up — correct behaviour, poor experience.
+2. **What abstain rate is acceptable?** Drives the target-precision setting, and therefore how often users see "not sure" instead of an answer.
 
 ## Sources
 
-- [Remote Sensing Approaches for Water Hyacinth and Water Quality Monitoring: Global Trends, Techniques, and Applications](https://doi.org/10.3390/w17172573) — *Water*, 2025. Review: sensor shares, accuracy ranges, DL ceiling.
-- [Environmental coherence framework for multi-sensor remote sensing: water hyacinth assessment in Lake Tana](https://www.nature.com/articles/s41598-026-46912-0) — *Sci Reports*, 2026. 11-indicator comparison; mixed-pixel finding.
-- [Advancing Water Hyacinth Recognition: Integration of Deep Learning and Multispectral Imaging](https://doi.org/10.3390/rs17040689) — *Remote Sensing*, Feb 2025. U-Net on multispectral hyacinth.
-- [Water hyacinth detection for autonomous navigation mapping using image segmentation cascaded classifier](https://www.nature.com/articles/s41598-025-34128-7) — *Sci Reports*, 2025. U-Net Dice/IoU figures.
-- [Towards Smart Monitoring of Invasive Aquatic Plants: YOLOv11 vs Faster R-CNN for Water Hyacinth Detection](https://www.researchsquare.com/article/rs-7323485/v1) — Research Square, 2025. Preprint.
-- [Distinguishing Algal Blooms from Aquatic Vegetation in Chinese Lakes Using Sentinel 2](https://doi.org/10.3390/rs14091988) — *Remote Sensing*, 2022.
-- [WaterHyacinth dataset](https://www.sciencedirect.com/science/article/pii/S2352340923009320) — *Data in Brief*, 2023.
-- [NASA-IMPACT/hls-foundation-os](https://github.com/NASA-IMPACT/hls-foundation-os) — Prithvi fine-tuning examples (superseded by TerraTorch).
+- [WaterHyacinth dataset](https://www.sciencedirect.com/science/article/pii/S2352340923009320) — *Data in Brief*, 2023. The Mendeley training set.
+- [AqUavplant dataset](https://pmc.ncbi.nlm.nih.gov/articles/PMC11661991/) — *Scientific Data*, 2024. UAV imagery with segmentation masks; not yet used.
+- [Towards Smart Monitoring of Invasive Aquatic Plants: YOLOv11 vs Faster R-CNN for Water Hyacinth Detection](https://www.researchsquare.com/article/rs-7323485/v1) — Research Square, 2025. Preprint; why detection was considered.
+- [iNaturalist Research-grade Observations on GBIF](https://www.gbif.org/dataset/50c9509d-22c7-4a22-a47d-8c48425ef4a7) — the geographic-diversity source.
 
-**Sourcing caveat:** the *Water* 2025 review returned HTTP 403 on direct fetch. Figures attributed to it (35%/26% sensor shares, 74–98% accuracy range, 97% DL ceiling, ML 65–98%) come from search-result extracts, not the full text. They are consistent across sources but have not been read in context — verify before quoting externally.
+Sources specific to satellite remote sensing were removed with that track. They are recoverable from git history (`git show 219c80e:docs/classifier-options.md`) if the satellite work resumes.

@@ -68,6 +68,6 @@ Also worth pulling the same for *Pistia stratiotes*, *Lemna minor*, and *Salvini
 
 ## Gaps
 
-- **No public satellite-resolution labelled hyacinth dataset** was found. Sentinel-2 training labels must be self-generated (spectral-index bootstrapping + SAM cleanup — see [classifier-options.md](classifier-options.md#tier-1--spectral-indices-do-this-first)).
+- **No public satellite-resolution labelled hyacinth dataset** was found. Relevant only if the satellite track is revived; labels would have to be self-generated.
 - **No mid-altitude (30–100 m) UAV dataset.** AqUavplant is 2.5 m. This is the gap own-capture should target if drone survey is planned.
 - **Geocoded ground truth is the missing asset.** Capture GPS + accuracy estimate + timestamp + rough mat extent from day one. Retrofitting location onto existing photos is impossible, and the ground-to-satellite transfer path depends on label quality more than model choice.
