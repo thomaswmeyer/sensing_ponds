@@ -791,8 +791,23 @@ def export_mobile(
     int8_path = quantize_int8(onnx_path)
 
     quant = None
+    ship_path = onnx_path
     if int8_path and test_loader is not None:
         quant = compare_int8_accuracy(onnx_path, int8_path, test_loader, temperature)
+        # Only ship INT8 if it actually survived. On this model every INT8
+        # strategy collapsed to near chance (0.88 -> 0.26) because hard-swish
+        # activation outliers dominate the per-tensor scale -- see
+        # docs/model-size.md. Shipping a 4x smaller model that cannot classify
+        # is not a size win.
+        if quant and quant["int8_accuracy"] >= quant["fp32_accuracy"] - 0.02:
+            ship_path = int8_path
+        else:
+            print(
+                "\nShipping fp32: INT8 did not survive quantisation.\n"
+                "Run src/compare_quantization.py to explore alternatives."
+            )
+    elif int8_path:
+        ship_path = int8_path
 
     # The client cannot abstain without these. Shipping the model without the
     # temperature and threshold means shipping raw overconfident softmax, which
@@ -802,10 +817,10 @@ def export_mobile(
             {
                 "classes": classes,
                 "input_size": IMG_SIZE,
-                # The INT8 graph is what ships; fp32 is kept for comparison and
-                # as the source for further conversion.
-                "model_file": (int8_path or onnx_path).name,
-                "quantization": "int8_dynamic" if int8_path else "none",
+                # Whichever variant passed the accuracy check. The client loads
+                # this name, so a failed quantisation cannot silently ship.
+                "model_file": ship_path.name,
+                "quantization": "int8_dynamic" if ship_path is int8_path else "none",
                 "preprocessing": {
                     "resize": int(IMG_SIZE * 1.14),
                     "center_crop": IMG_SIZE,
@@ -823,11 +838,10 @@ def export_mobile(
     print(f"\nONNX fp32:  {onnx_path}")
     print(f"Labels:     {out_dir / 'labels.txt'}")
     print(f"Config:     {out_dir / 'model_config.json'}  (preprocessing + abstain params)")
-    if int8_path:
-        print(
-            f"\nDeploy:     cp {int8_path.name} web/public/model/plants.onnx\n"
-            f"            cp model_config.json web/public/model/"
-        )
+    print(
+        f"\nDeploy:     cp {ship_path.name} web/public/model/plants.onnx\n"
+        f"            cp model_config.json web/public/model/"
+    )
     model.to(device)
 
 

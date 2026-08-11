@@ -32,16 +32,62 @@ WebGPU is not worth its weight here. This model is 1.5M parameters at 224×224 �
 
 The threaded build needs cross-origin isolation (COOP/COEP headers) to use `SharedArrayBuffer`. Without those headers it downloads and then silently falls back to single-threaded anyway. `ort.env.wasm.numThreads = 1` and a `globIgnores` entry keep it out.
 
-### 3. INT8 dynamic quantisation — model 5.79 MB → 1.58 MB
+### 3. ❌ INT8 quantisation — abandoned, ships fp32
 
-| Precision | Raw | Gzipped | Latency (desktop CPU) |
-|---|---|---|---|
-| fp32 | 5.79 MB | 5.33 MB | 1.2 ms |
-| **INT8 dynamic** | **1.58 MB** | **1.27 MB** | 4.7 ms |
+**Every INT8 strategy destroyed the model.** Measured on the trained model against the 920-image held-out test set:
 
-⚠️ **INT8 is 4× *slower* here.** Dynamic quantisation inserts `DynamicQuantizeLinear` / `ConvInteger` / `Cast` nodes — the graph goes from 159 nodes to 482. On a small model the quantisation overhead exceeds the arithmetic saved. Both are far below any perceptible threshold, so the 4.5 MB saved is worth it — but do not assume INT8 is faster.
+| Variant | Accuracy | Size |
+|---|---|---|
+| **fp32 (shipping)** | **0.8826** | 5.81 MB |
+| dynamic, per-tensor QUInt8 | 0.2620 | 1.61 MB |
+| dynamic, per-channel QUInt8 | 0.2652 | 1.61 MB |
+| dynamic, per-channel QInt8 | 0.2207 | 1.61 MB |
+| dynamic, 13 worst Conv layers excluded | 0.2880 | 1.83 MB |
+| static QDQ, MinMax calibration | 0.2837 | 1.75 MB |
+| static QDQ, Entropy calibration | 0.2837 | 1.75 MB |
+| static QDQ, **Percentile** calibration | 0.5467 | 1.75 MB |
 
-⚠️ **Verify INT8 accuracy before shipping.** MobileNetV3's hard-swish and squeeze-excite blocks are known to quantise poorly. If accuracy drops, switch to `efficientnet_lite0` (designed without those ops) or use quantisation-aware training.
+Four classes, so chance is 0.25. Most variants are **at chance** — total failure, not degradation.
+
+Reproduce with [`src/compare_quantization.py`](../src/compare_quantization.py).
+
+#### Why: activation outliers, not weights
+
+The first hypothesis was weight range. 13 of 53 Conv layers have per-channel weight ranges spanning more than 10 orders of magnitude — some squeeze-excite projection channels max out at `1e-16` beside others at `5e-1`:
+
+```
+     ratio  shape                     min|w|    max|w|
+ 5.3e+11    (64, 240, 1, 1)         1.18e-16  5.32e-01
+ 2.6e+11    (32, 120, 1, 1)         1.32e-13  2.65e-01
+ 2.3e+11    (24, 96, 1, 1)          1.35e-12  3.16e-01
+```
+
+**That hypothesis was wrong.** Excluding all 13 layers from quantisation left accuracy at 0.2880. Those near-zero channels are dead units the model learned to ignore — harmless in fp32 and not the cause. Per-channel quantisation, which exists precisely to handle weight-range spread, also did not help.
+
+The actual mechanism shows up when you scale the input:
+
+```
+input ×0.1  →  int8 logits ≈ [-0.6, -3.7, -0.5, -3.0]     fp32 ≈ [0.6, -0.1, -2.4, -1.3]
+input ×5.0  →  int8 logits ≈ [-10304, -23582, 13344, 3348]
+```
+
+Logits explode by four orders of magnitude while fp32 stays bounded. **Hard-swish activations produce large outliers**, and a per-tensor activation scale derived from those outliers crushes the real signal into a few quantisation levels.
+
+This is consistent with the one partial success: Percentile calibration clips activation outliers at the 99.999th percentile instead of taking the true max, and recovers 0.2837 → 0.5467. Still 34 points short.
+
+#### Why regularisation would not fix it
+
+Stronger weight decay or dropout shrinks weights *toward* zero, compressing dynamic range rather than lifting the floor — it would create more `1e-16` channels, not fewer. And since excluding the extreme-range layers changed nothing, weight distribution is not the binding constraint. The problem is on the activation side, which weight regularisation does not control.
+
+#### Decision: ship fp32
+
+**5.81 MB raw / 5.33 MB gzipped.** Roughly 4 MB more than INT8 would have cost, on a first load that is cached forever afterwards. A 62-point accuracy loss is not a trade worth making.
+
+Paths that could recover INT8, in order of cost:
+
+1. **`efficientnet_lite0`** — designed for quantisation, with hard-swish and squeeze-excite deliberately removed. ~4.7M params, so somewhat larger fp32, but should quantise cleanly. Requires retraining (~1 hour) and re-verifying.
+2. **Quantisation-aware training** — the model learns to tolerate quantisation noise. Most reliable, most work.
+3. **fp16** — halves size to ~2.9 MB with far less accuracy risk than INT8. Untested here; the obvious next thing to try.
 
 ## Possible: custom minimal ORT build
 

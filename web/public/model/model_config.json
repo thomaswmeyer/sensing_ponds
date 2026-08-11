@@ -1,0 +1,34 @@
+{
+  "classes": [
+    "duckweed",
+    "salvinia",
+    "water_hyacinth",
+    "water_lettuce"
+  ],
+  "input_size": 224,
+  "model_file": "plants.onnx",
+  "quantization": "none",
+  "preprocessing": {
+    "resize": 255,
+    "center_crop": 224,
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "temperature": 0.8586198687553406,
+  "abstain_threshold": 0.7200000000000004,
+  "abstain_supported": true,
+  "int8_vs_fp32": {
+    "fp32_accuracy": 0.8826086956521739,
+    "int8_accuracy": 0.2826086956521739,
+    "agreement": 0.3065217391304348
+  },
+  "quantization_note": "INT8 abandoned: all variants collapsed to near chance. See docs/model-size.md"
+}
