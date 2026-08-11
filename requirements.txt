@@ -1,0 +1,15 @@
+# Mobile field-identification classifier
+# See docs/classifier-options.md#mobile-field-identification-track
+
+torch>=2.2
+torchvision>=0.17
+timm>=1.0.9              # Apache-2.0; deliberately not ultralytics (AGPL-3.0)
+albumentations>=1.4.21   # >=1.4.21 for the RandomResizedCrop(size=...) signature
+opencv-python-headless>=4.9
+numpy>=1.26
+pillow>=10.2
+scikit-learn>=1.4
+
+# Mobile export (optional -- only needed for --export-tflite)
+# onnx>=1.16
+# onnx2tf>=1.22

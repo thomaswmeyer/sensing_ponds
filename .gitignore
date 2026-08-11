@@ -1,0 +1,30 @@
+# Datasets -- large, externally sourced, and redistributable only under their
+# own licences. Fetch with scripts/fetch_ppcc.py and src/fetch_gbif.py, or from
+# Mendeley (see docs/datasets.md).
+data/mendeley/
+data/gbif/
+data/ground_truth/*.pdf
+
+# ...but keep the derived tables and provenance records, which are small and
+# are the actual inputs to modelling.
+!data/ppcc_surface_water.csv
+!data/gbif/manifest.csv
+
+# Training artefacts
+runs/
+*.pt
+*.onnx
+*.tflite
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# macOS
+.DS_Store
