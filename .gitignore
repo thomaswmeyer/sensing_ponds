@@ -28,3 +28,12 @@ dist/
 
 # macOS
 .DS_Store
+
+# Web build output and generated service worker
+web/dist/
+web/dev-dist/
+
+# Large binary assets fetched separately -- see web/public/ASSETS-NEEDED.md
+web/public/model/*.onnx
+web/public/fonts/*.woff2
+web/public/audio/

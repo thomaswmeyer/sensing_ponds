@@ -1,0 +1,525 @@
+/*
+ * Field-use styling: bright sun, wet hands, phone held at an angle.
+ *
+ * Two constraints shape everything here:
+ *
+ * 1. Tamil text runs 20-40% longer than English and its glyphs are taller.
+ *    Nothing is fixed-width, nothing truncates, and line-height is generous.
+ *    Test layouts in Tamil first -- if it fits in Tamil it fits in English.
+ *
+ * 2. Meaning never rests on text alone. Every state carries an icon, a colour
+ *    and (where recorded) audio, because a primary audience cannot read.
+ */
+
+@font-face {
+  font-family: 'Noto Sans Tamil';
+  /* Bundled rather than loaded from a CDN: the app must work offline, and
+     Android device coverage for Tamil is inconsistent -- the failure mode is
+     tofu, empty boxes where the text should be. */
+  src: url('/fonts/NotoSansTamil-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Noto Sans Tamil';
+  src: url('/fonts/NotoSansTamil-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0b1f16;
+  --surface: #133023;
+  --surface-2: #1b4030;
+  --text: #f2f7f4;
+  --text-dim: #a8c4b7;
+  --accent: #4ade80;
+  --confident: #4ade80;
+  --uncertain: #fbbf24;
+  --abstain: #94a3b8;
+  --danger: #f87171;
+  --radius: 14px;
+
+  /* Touch targets sized for wet hands and a moving boat. */
+  --tap: 56px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans Tamil', system-ui, -apple-system, sans-serif;
+  /* Tamil glyphs need more vertical room than Latin. */
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.app__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  flex-wrap: wrap;
+}
+
+.app__header h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 1.25rem;
+  /* Never truncate Tamil: clipping mid-cluster can change what the word reads
+     as, and ellipsis is invisible to a user relying on audio. */
+  overflow-wrap: break-word;
+}
+
+.app__main {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* ---------------------------------------------------------------- locale -- */
+
+.locale-switch {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 4px;
+}
+
+.locale-switch button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.locale-switch button.is-active {
+  background: var(--accent);
+  color: #06170f;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------- camera -- */
+
+.camera {
+  position: absolute;
+  inset: 0;
+  background: #000;
+}
+
+.camera__preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.camera__status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  color: var(--text-dim);
+}
+
+.shutter {
+  position: absolute;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(255, 255, 255, 0.25);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.shutter__ring {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: inset 0 0 0 4px rgba(0, 0, 0, 0.15);
+}
+
+.shutter:disabled {
+  opacity: 0.4;
+}
+
+.camera--blocked {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.blocked-card {
+  text-align: center;
+  max-width: 22rem;
+}
+
+.blocked-icon {
+  font-size: 3rem;
+}
+
+/* ---------------------------------------------------------------- result -- */
+
+.working {
+  display: grid;
+  place-content: center;
+  gap: 16px;
+  height: 100%;
+  justify-items: center;
+  color: var(--text-dim);
+}
+
+.spinner {
+  width: 44px;
+  height: 44px;
+  border: 4px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 3s;
+  }
+}
+
+.result {
+  height: 100%;
+  overflow-y: auto;
+}
+
+.result__photo img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.result__body {
+  padding: 20px 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.verdict h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 12px;
+  font-size: 1.75rem;
+  overflow-wrap: break-word;
+}
+
+.verdict__lead {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.verdict--abstain {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 20px;
+  text-align: center;
+}
+
+.verdict__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--abstain);
+  color: #06170f;
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+.verdict--abstain h2 {
+  justify-content: center;
+}
+
+/* Confidence as three discrete bars, never a percentage. */
+.meter {
+  display: flex;
+  gap: 6px;
+}
+
+.meter span {
+  height: 8px;
+  width: 40px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.meter--confident span {
+  background: var(--confident);
+}
+
+.meter--uncertain span:nth-child(-n + 2) {
+  background: var(--uncertain);
+}
+
+/* ------------------------------------------------------------------ uses -- */
+
+.uses h3,
+.extent h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+  color: var(--text-dim);
+}
+
+.uses ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.uses li {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.use__label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.1rem;
+}
+
+/* --------------------------------------------------------------- caution -- */
+
+.caution {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: rgba(248, 113, 113, 0.12);
+  border-left: 4px solid var(--danger);
+  color: #fecaca;
+  font-size: 0.98rem;
+}
+
+.caution--inline {
+  margin-top: 10px;
+  font-size: 0.92rem;
+}
+
+.caution__icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #2a0a0a;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------- extent -- */
+
+.extent__options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.extent__options button {
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 6px;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: center;
+  cursor: pointer;
+  /* Tamil labels wrap onto two lines here; the fixed min-height keeps the three
+     buttons aligned regardless of locale. */
+  overflow-wrap: break-word;
+}
+
+.extent__options button.is-active {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+/* Extent shown as increasing coverage, readable without the label. */
+.extent__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  position: relative;
+  overflow: hidden;
+}
+
+.extent__icon::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  background: var(--accent);
+}
+
+.extent__icon--isolated::after {
+  height: 20%;
+}
+.extent__icon--patch::after {
+  height: 55%;
+}
+.extent__icon--large_mat::after {
+  height: 100%;
+}
+
+/* --------------------------------------------------------------- buttons -- */
+
+.btn {
+  min-height: var(--tap);
+  padding: 0 24px;
+  border: 0;
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 1.05rem;
+  cursor: pointer;
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: #06170f;
+  font-weight: 700;
+}
+
+.btn--ghost {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.speak {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.speak--sm {
+  width: 36px;
+  height: 36px;
+}
+
+.speak svg {
+  width: 20px;
+  height: 20px;
+}
+
+.speak--sm svg {
+  width: 17px;
+  height: 17px;
+}
+
+.speak.is-playing {
+  background: var(--accent);
+  color: #06170f;
+}
+
+/* ---------------------------------------------------------------- status -- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 16px 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+}
+
+.banner--error {
+  background: rgba(248, 113, 113, 0.15);
+  color: #fecaca;
+}
+
+.app__footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+
+.pending-badge {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--uncertain);
+  color: #2a1a00;
+  font-weight: 700;
+}
