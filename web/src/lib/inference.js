@@ -17,7 +17,11 @@
  * two. See docs/getting-data.md#training.
  */
 
-import * as ort from 'onnxruntime-web'
+// The `/wasm` entry point, not the default. The default bundle pulls in WebGPU
+// and WebGL backends plus the JSEP WASM build: ~590 KB of JS and a 25.6 MB
+// binary. This app needs neither -- a 2 MB model at 224x224 runs in single-digit
+// milliseconds on the CPU backend. See docs/model-size.md.
+import * as ort from 'onnxruntime-web/wasm'
 
 const MODEL_URL = '/model/plants.onnx'
 const CONFIG_URL = '/model/model_config.json'
@@ -54,7 +58,7 @@ export async function loadModel() {
     sessionPromise = (async () => {
       config = await loadConfig()
       return ort.InferenceSession.create(MODEL_URL, {
-        executionProviders: ['webgpu', 'wasm'],
+        executionProviders: ['wasm'],
         graphOptimizationLevel: 'all',
       })
     })().catch((err) => {

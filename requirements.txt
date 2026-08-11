@@ -10,6 +10,8 @@ numpy>=1.26
 pillow>=10.2
 scikit-learn>=1.4
 
-# Mobile export (optional -- only needed for --export-tflite)
-# onnx>=1.16
-# onnx2tf>=1.22
+# Mobile export. Needed for --export-tflite: onnx for the graph, onnxruntime for
+# INT8 dynamic quantisation (5.79 MB -> 1.58 MB) and the accuracy comparison
+# against fp32. Training still runs without them; export degrades to fp32 only.
+onnx>=1.16
+onnxruntime>=1.20

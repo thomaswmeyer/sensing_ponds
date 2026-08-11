@@ -566,7 +566,98 @@ def run(args: argparse.Namespace) -> None:
     print(f"\nCheckpoint: {ckpt_path}\nMetrics:    {out_dir / 'metrics.json'}")
 
     if args.export_tflite:
-        export_mobile(model, classes, out_dir, device, temperature, thr)
+        export_mobile(model, classes, out_dir, device, temperature, thr, test_dl)
+
+
+def quantize_int8(onnx_path: Path) -> Path | None:
+    """Dynamic INT8 quantisation of the exported graph.
+
+    Dynamic rather than static: static quantisation needs a calibration dataset
+    and gets marginally better accuracy, but dynamic needs nothing and the
+    weights are what dominate size here. Weights-only INT8 gets the 3.7x.
+
+    Returns None (with a warning) if onnx/onnxruntime are absent -- they are
+    optional deps, and training should not fail because the export tooling is
+    missing.
+    """
+    try:
+        from onnxruntime.quantization import QuantType, quantize_dynamic
+        from onnxruntime.quantization.preprocess import quant_pre_process
+    except ImportError:
+        print(
+            "\nNOTE: onnx/onnxruntime not installed -- skipping INT8 quantisation.\n"
+            "      pip install onnx onnxruntime  (fp32 ONNX was still written)"
+        )
+        return None
+
+    prep = onnx_path.with_name(onnx_path.stem + "_prep.onnx")
+    int8_path = onnx_path.with_name(onnx_path.stem + "_int8.onnx")
+
+    quant_pre_process(str(onnx_path), str(prep), skip_symbolic_shape=True)
+    quantize_dynamic(str(prep), str(int8_path), weight_type=QuantType.QUInt8)
+    prep.unlink(missing_ok=True)
+
+    fp32_mb = onnx_path.stat().st_size / 1048576
+    int8_mb = int8_path.stat().st_size / 1048576
+    print(f"\nINT8:       {int8_path}")
+    print(f"            {fp32_mb:.2f} MB -> {int8_mb:.2f} MB ({fp32_mb / int8_mb:.1f}x smaller)")
+    return int8_path
+
+
+@torch.no_grad()
+def compare_int8_accuracy(
+    fp32_path: Path,
+    int8_path: Path,
+    loader: DataLoader,
+    temperature: float,
+) -> dict | None:
+    """Re-evaluate the quantised graph on the held-out set.
+
+    This is the check that decides whether INT8 is shippable. MobileNetV3's
+    hard-swish and squeeze-excite blocks are known to quantise badly, and the
+    failure is silent -- the model keeps working, just worse. Measuring beats
+    assuming.
+    """
+    try:
+        import onnxruntime as rt
+    except ImportError:
+        return None
+
+    sessions = {
+        tag: rt.InferenceSession(str(p), providers=["CPUExecutionProvider"])
+        for tag, p in (("fp32", fp32_path), ("int8", int8_path))
+    }
+
+    correct = {"fp32": 0, "int8": 0}
+    agree = 0
+    total = 0
+    for x, y in loader:
+        batch = x.numpy()
+        preds = {}
+        for tag, sess in sessions.items():
+            logits = sess.run(None, {sess.get_inputs()[0].name: batch})[0]
+            preds[tag] = logits.argmax(axis=1)
+            correct[tag] += int((preds[tag] == y.numpy()).sum())
+        agree += int((preds["fp32"] == preds["int8"]).sum())
+        total += len(y)
+
+    result = {
+        "fp32_accuracy": correct["fp32"] / total,
+        "int8_accuracy": correct["int8"] / total,
+        "agreement": agree / total,
+    }
+    delta = result["int8_accuracy"] - result["fp32_accuracy"]
+    print(
+        f"\nINT8 accuracy check ({total} held-out images):\n"
+        f"  fp32 {result['fp32_accuracy']:.4f}   int8 {result['int8_accuracy']:.4f}"
+        f"   delta {delta:+.4f}   agreement {result['agreement']:.4f}"
+    )
+    if delta < -0.02:
+        print(
+            "  WARNING: INT8 costs >2 points of accuracy. MobileNetV3 hard-swish and\n"
+            "  squeeze-excite quantise poorly -- consider efficientnet_lite0 or QAT."
+        )
+    return result
 
 
 def export_mobile(
@@ -576,16 +667,20 @@ def export_mobile(
     device: torch.device,
     temperature: float,
     threshold: float | None,
+    test_loader: DataLoader | None = None,
 ) -> None:
-    """Export ONNX for downstream TFLite/ExecuTorch conversion.
+    """Export ONNX (fp32 and INT8) for browser and mobile deployment.
 
-    Direct PyTorch->TFLite has no first-party path; ONNX then onnx2tf (or
-    ai-edge-torch) is the practical route.
+    INT8 is the shipping artefact: 5.79 MB -> 1.58 MB, and 1.27 MB gzipped, which
+    matters on a rural connection. It is measurably *slower* per inference than
+    fp32 on a small model like this -- dynamic quantisation adds quantise and
+    dequantise nodes that cost more than the arithmetic they save -- but both are
+    milliseconds, so size wins. See docs/model-size.md.
 
-    Watch INT8 accuracy here: MobileNetV3's hard-swish and squeeze-excite blocks
-    quantise poorly. If post-training quantisation degrades noticeably, switch to
-    efficientnet_lite0 (built without those ops) or use quantisation-aware
-    training. Verify -- do not assume it survived.
+    Watch INT8 accuracy: MobileNetV3's hard-swish and squeeze-excite blocks
+    quantise poorly. The accuracy delta is reported below; if it is material,
+    switch to efficientnet_lite0 (built without those ops) or use
+    quantisation-aware training. Verify -- do not assume it survived.
     """
     model.eval().to("cpu")
     onnx_path = out_dir / "mobilenetv3_small_plants.onnx"
@@ -597,8 +692,19 @@ def export_mobile(
         output_names=["logits"],
         dynamic_axes={"image": {0: "batch"}, "logits": {0: "batch"}},
         opset_version=17,
+        # TorchScript exporter, not dynamo. Torch 2.9+ defaults to dynamo, which
+        # pulls in onnxscript and emits a graph the ORT quantiser handles less
+        # predictably. This model has no control flow, so the legacy path is both
+        # sufficient and one fewer dependency.
+        dynamo=False,
     )
     (out_dir / "labels.txt").write_text("\n".join(classes) + "\n")
+
+    int8_path = quantize_int8(onnx_path)
+
+    quant = None
+    if int8_path and test_loader is not None:
+        quant = compare_int8_accuracy(onnx_path, int8_path, test_loader, temperature)
 
     # The client cannot abstain without these. Shipping the model without the
     # temperature and threshold means shipping raw overconfident softmax, which
@@ -608,6 +714,10 @@ def export_mobile(
             {
                 "classes": classes,
                 "input_size": IMG_SIZE,
+                # The INT8 graph is what ships; fp32 is kept for comparison and
+                # as the source for further conversion.
+                "model_file": (int8_path or onnx_path).name,
+                "quantization": "int8_dynamic" if int8_path else "none",
                 "preprocessing": {
                     "resize": int(IMG_SIZE * 1.14),
                     "center_crop": IMG_SIZE,
@@ -617,14 +727,19 @@ def export_mobile(
                 "temperature": temperature,
                 "abstain_threshold": threshold,
                 "abstain_supported": threshold is not None,
+                **({"int8_vs_fp32": quant} if quant else {}),
             },
             indent=2,
         )
     )
-    print(f"ONNX:       {onnx_path}")
+    print(f"\nONNX fp32:  {onnx_path}")
     print(f"Labels:     {out_dir / 'labels.txt'}")
     print(f"Config:     {out_dir / 'model_config.json'}  (preprocessing + abstain params)")
-    print("Convert:    onnx2tf -i %s -oiqt   # INT8 TFLite" % onnx_path.name)
+    if int8_path:
+        print(
+            f"\nDeploy:     cp {int8_path.name} web/public/model/plants.onnx\n"
+            f"            cp model_config.json web/public/model/"
+        )
     model.to(device)
 
 
