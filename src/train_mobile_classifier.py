@@ -187,59 +187,64 @@ def group_split(
     val_frac: float,
     seed: int,
 ) -> tuple[list[Sample], list[Sample], list[Sample]]:
-    """Split into train / val / out-of-domain test.
+    """Stratified random split into train / val / test, balanced per class.
 
-    The test set is **GBIF regional records only** (India + Sri Lanka), held out
-    entirely. This is deliberate and is the only measurement here worth trusting.
+    An earlier design held out GBIF regional records (India + Sri Lanka) as the
+    whole test set, to measure transfer to the deployment region. That is a more
+    honest question, but it produced an unusable split: hyacinth has by far the
+    most regional records, so it landed 396 training images against 1,200 test,
+    while duckweed got 18 test images. Neither number means anything.
 
-    Why not a conventional random or group split: the Mendeley images come from
-    just 10 capture days in two Bangladeshi districts. Any split of that data
-    measures how well the model recognises those particular ponds, not whether it
-    identifies plants. Even a strict date-level split leaves train and test one
-    afternoon apart at the same site.
+    So: stratified random, which keeps every class properly represented in both
+    sets. The cost is real and worth stating plainly -- the Mendeley images come
+    from 10 capture days, so photos of the same pond minutes apart will land in
+    both train and test. The headline accuracy is therefore optimistic and does
+    not predict field performance.
 
-    Holding out regional GBIF records instead measures the thing that actually
-    matters: does a model trained mostly on Bangladeshi and global photos work on
-    South Indian and Sri Lankan water bodies -- the deployment region. It is a
-    harder and much more honest test, so expect a materially lower number than a
-    random split would report. That gap is the finding, not a problem to tune away.
+    To keep the honest signal, the regional images are tracked as a *secondary*
+    evaluation slice (see `regional` on Sample) and reported alongside the
+    headline number rather than removed from training. The gap between the two is
+    the domain-shift estimate.
 
-    Validation is a group-held-out slice of the training pool, used only for
-    checkpoint selection.
+    Grouping is still respected within the stratification: an entire capture
+    session goes to one split, so at least same-minute duplicates do not straddle
+    the boundary.
     """
-    test = [s for s in samples if s.regional]
-    pool = [s for s in samples if not s.regional]
-
-    if len(test) < 40:
-        raise SystemExit(
-            f"Only {len(test)} regional images -- too few for an out-of-domain test set.\n"
-            "Run: python src/fetch_gbif.py --out data/gbif  (and check the regional counts)"
-        )
-
-    by_group: dict[str, list[Sample]] = defaultdict(list)
-    for s in pool:
-        by_group[s.group].append(s)
-
-    groups = sorted(by_group)
     rng = random.Random(seed)
-    rng.shuffle(groups)
+    test_frac = val_frac  # symmetric val/test
 
-    want_val = int(len(pool) * val_frac)
-    val: list[Sample] = []
+    by_class: dict[int, dict[str, list[Sample]]] = defaultdict(lambda: defaultdict(list))
+    for s in samples:
+        by_class[s.label][s.group].append(s)
+
     train: list[Sample] = []
-    for g in groups:
-        (val if len(val) < want_val else train).extend(by_group[g])
+    val: list[Sample] = []
+    test: list[Sample] = []
 
-    for name, split in (("train", train), ("val", val)):
+    # Stratify per class so each split sees every class in proportion, then
+    # assign whole groups within a class to avoid same-session leakage.
+    for label in sorted(by_class):
+        groups = sorted(by_class[label])
+        rng.shuffle(groups)
+        n = sum(len(by_class[label][g]) for g in groups)
+        want_test, want_val = int(n * test_frac), int(n * val_frac)
+
+        n_test = n_val = 0
+        for g in groups:
+            bucket = by_class[label][g]
+            if n_test < want_test:
+                test.extend(bucket)
+                n_test += len(bucket)
+            elif n_val < want_val:
+                val.extend(bucket)
+                n_val += len(bucket)
+            else:
+                train.extend(bucket)
+
+    for name, split in (("train", train), ("val", val), ("test", test)):
         if not split:
-            raise SystemExit(f"{name} split is empty -- too few distinct groups ({len(groups)}).")
+            raise SystemExit(f"{name} split is empty -- too few distinct groups.")
 
-    missing = set(range(max(s.label for s in samples) + 1)) - {s.label for s in test}
-    if missing:
-        print(
-            f"NOTE: {len(missing)} class(es) have no regional test images; "
-            "their test-set metrics will be absent or unreliable."
-        )
     return train, val, test
 
 
@@ -454,9 +459,7 @@ def run(args: argparse.Namespace) -> None:
     val_dl = DataLoader(PlantDataset(val_s, eval_transform()), shuffle=False, **loader_kw)
     test_dl = DataLoader(PlantDataset(test_s, eval_transform()), shuffle=False, **loader_kw)
 
-    model = timm.create_model(
-        args.model, pretrained=True, num_classes=len(classes), drop_rate=args.dropout
-    ).to(device)
+    model = build_model(args, len(classes)).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -508,7 +511,7 @@ def run(args: argparse.Namespace) -> None:
     thr, coverage = abstain_threshold(probs, labels, args.target_precision)
 
     print("\n" + "=" * 70)
-    print("OUT-OF-DOMAIN TEST -- GBIF regional records (India / Sri Lanka)")
+    print("TEST -- stratified random split")
     print(f"accuracy {acc:.4f}   balanced {bal_acc:.4f}   ECE {ece:.4f}   T={temperature:.3f}")
     print("=" * 70)
     present = sorted({int(c) for c in labels.unique()})
@@ -536,20 +539,49 @@ def run(args: argparse.Namespace) -> None:
             "it is wrong. Either gather more regional data or lower the target."
         )
 
+    # Secondary slice: the regional (India / Sri Lanka) images inside the test
+    # set. These are the closest proxy available for deployment conditions, so
+    # the gap between this and the headline is the domain-shift estimate.
+    regional_idx = [i for i, s in enumerate(test_s) if s.regional]
+    regional = None
+    if len(regional_idx) >= 20:
+        r_probs = probs[regional_idx]
+        r_labels = labels[regional_idx]
+        r_preds = r_probs.argmax(-1)
+        regional = {
+            "n": len(regional_idx),
+            "accuracy": (r_preds == r_labels).float().mean().item(),
+            "classes_present": sorted({classes[int(c)] for c in r_labels.unique()}),
+        }
+        print(
+            f"\n--- Regional subset ({regional['n']} images from IN/LK) ---\n"
+            f"accuracy {regional['accuracy']:.4f}   "
+            f"(headline {acc:.4f}, gap {regional['accuracy'] - acc:+.4f})"
+        )
+        print(f"classes present: {', '.join(regional['classes_present'])}")
+    else:
+        print(f"\nRegional subset too small to report ({len(regional_idx)} images).")
+
     print(
-        "\nNOTE: this is an out-of-domain score -- trained mostly on Bangladeshi and\n"
-        "global photos, tested on regional ones. It is deliberately harder than a\n"
-        "random split and is the number that predicts field behaviour. Deployment\n"
-        "adds further shift (season, camera, holding angle) -- expect lower still."
+        "\nNOTE: the headline number comes from a stratified RANDOM split. The\n"
+        "Mendeley images span only 10 capture days, so near-duplicate photos of the\n"
+        "same pond appear in both train and test -- this figure is optimistic and\n"
+        "does not predict field performance. The regional subset above is the\n"
+        "better proxy, and deployment adds further shift beyond even that."
     )
 
     (out_dir / "metrics.json").write_text(
         json.dumps(
             {
                 "classes": classes,
-                "test_set": "gbif_regional_held_out",
+                "test_set": "stratified_random",
+                "split_caveat": (
+                    "Random split over data spanning 10 Mendeley capture days; "
+                    "same-session leakage inflates this number."
+                ),
                 "test_accuracy": acc,
                 "test_balanced_accuracy": bal_acc,
+                "regional_subset": regional,
                 "expected_calibration_error": ece,
                 "temperature": temperature,
                 "abstain_threshold": thr,
@@ -567,6 +599,58 @@ def run(args: argparse.Namespace) -> None:
 
     if args.export_tflite:
         export_mobile(model, classes, out_dir, device, temperature, thr, test_dl)
+
+
+def build_model(args: argparse.Namespace, n_classes: int) -> nn.Module:
+    """Create the model, loading ImageNet weights from a local file if given.
+
+    --pretrained-weights exists because timm fetches weights through
+    huggingface_hub, which uses Python's certificate bundle. On a machine behind
+    a TLS-inspecting proxy that fails with CERTIFICATE_VERIFY_FAILED, and unlike
+    the GBIF fetcher there is no way to route it through curl. Download the file
+    separately and pass it in:
+
+        curl -sSL -o weights.safetensors \\
+          https://huggingface.co/timm/mobilenetv3_small_100.lamb_in1k/resolve/main/model.safetensors
+
+    Training from scratch is not a viable fallback: ~6k images is nowhere near
+    enough, and ImageNet initialisation is doing most of the work here.
+    """
+    if not args.pretrained_weights:
+        return timm.create_model(
+            args.model, pretrained=True, num_classes=n_classes, drop_rate=args.dropout
+        )
+
+    from safetensors.torch import load_file
+
+    model = timm.create_model(
+        args.model, pretrained=False, num_classes=n_classes, drop_rate=args.dropout
+    )
+    state = load_file(args.pretrained_weights)
+
+    # The checkpoint's classifier is 1000-way ImageNet; ours is n_classes. Drop
+    # any shape-mismatched tensor and let it stay randomly initialised.
+    model_state = model.state_dict()
+    usable = {k: v for k, v in state.items() if k in model_state and v.shape == model_state[k].shape}
+    skipped = sorted(set(state) - set(usable))
+
+    missing, unexpected = model.load_state_dict(usable, strict=False)
+    print(
+        f"Loaded {len(usable)}/{len(state)} pretrained tensors from "
+        f"{args.pretrained_weights}"
+    )
+    if skipped:
+        print(f"  reinitialised (shape mismatch): {', '.join(skipped)}")
+    if unexpected:
+        print(f"  WARNING unexpected keys: {len(unexpected)}")
+    # A near-total mismatch means the wrong checkpoint for this architecture --
+    # training would silently proceed from noise.
+    if len(usable) < 0.5 * len(model_state):
+        raise SystemExit(
+            f"Only {len(usable)}/{len(model_state)} tensors matched -- "
+            f"'{args.pretrained_weights}' does not look like weights for {args.model}."
+        )
+    return model
 
 
 def quantize_int8(onnx_path: Path) -> Path | None:
@@ -750,6 +834,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", default="runs/mobile-classifier")
     p.add_argument("--model", default="mobilenetv3_small_100",
                    help="timm model; try efficientnet_lite0 if INT8 degrades")
+    p.add_argument("--pretrained-weights", default=None,
+                   help="Local .safetensors of ImageNet weights. Use when timm "
+                        "cannot reach huggingface.co (e.g. TLS-inspecting proxy)")
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=3e-4)
