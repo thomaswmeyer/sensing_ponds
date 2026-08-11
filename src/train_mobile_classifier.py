@@ -446,7 +446,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"Device:  {device}")
     print(f"Classes: {classes}")
     print(f"Sources: {dict(src)}  ({len({s.group for s in samples})} capture groups)")
-    print(f"Split:   train={len(train_s)}  val={len(val_s)}  test={len(test_s)} (regional, held out)")
+    n_regional = sum(1 for s in test_s if s.regional)
+    print(
+        f"Split:   train={len(train_s)}  val={len(val_s)}  test={len(test_s)}"
+        f"  (stratified random; {n_regional} test images are regional)"
+    )
     print(f"         train: {dict(Counter(classes[s.label] for s in train_s))}")
     print(f"         test:  {dict(Counter(classes[s.label] for s in test_s))}")
 

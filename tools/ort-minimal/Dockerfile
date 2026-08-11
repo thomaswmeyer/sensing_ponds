@@ -30,6 +30,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m pip install --no-cache-dir packaging numpy setuptools wheel
 
+# ORT's build.sh refuses to run as root unless --allow_running_as_root is passed.
+# Using a real unprivileged user is the better answer: emsdk writes into its own
+# tree during install, and running that as root leaves root-owned artefacts that
+# are awkward to extract.
+RUN useradd -m -s /bin/bash builder && mkdir -p /src /out && chown builder:builder /src /out
+USER builder
+
 WORKDIR /src
 
 # Shallow clone with submodules: the full history is ~4 GB and unnecessary.
@@ -40,7 +47,7 @@ RUN git clone --depth 1 --branch ${ORT_VERSION} --recursive \
 # The operator config generated from our model. Regenerate whenever the model
 # ARCHITECTURE changes -- weights do not matter, but a different backbone or a
 # change between fp32 and INT8 alters the op set and invalidates this build.
-COPY required_operators_and_types.config /src/ops.config
+COPY --chown=builder:builder required_operators_and_types.config /src/ops.config
 
 WORKDIR /src/onnxruntime
 
@@ -70,7 +77,6 @@ RUN ./build.sh \
       --emsdk_version 3.1.59
 
 # Artefacts land here; extract with `docker cp` (see README).
-RUN mkdir -p /out && \
-    find build/Linux/MinSizeRel -maxdepth 1 \( -name '*.wasm' -o -name '*.mjs' -o -name '*.js' \) \
+RUN find build/Linux/MinSizeRel -maxdepth 1 \( -name '*.wasm' -o -name '*.mjs' -o -name '*.js' \) \
       -exec cp {} /out/ \; && \
     ls -la /out
