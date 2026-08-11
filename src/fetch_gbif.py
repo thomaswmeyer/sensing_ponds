@@ -231,6 +231,77 @@ def download_one(rec: dict, dest: Path) -> tuple[bool, str]:
         return False, type(exc).__name__
 
 
+# Manifest flush cadence, in successfully-downloaded images. Bounds how many
+# images an abrupt kill can leave without an attribution row.
+FLUSH_EVERY = 25
+
+MANIFEST_FIELDS = [
+    "class", "species", "gbif_key", "license", "rights_holder", "recorded_by",
+    "country", "lat", "lon", "event_date", "regional", "url",
+]
+
+
+def write_manifest(path: Path, rows: list[dict]) -> None:
+    """Write the manifest atomically.
+
+    Via a temp file and rename so an interrupt mid-write cannot leave a truncated
+    manifest -- which would silently orphan every image below the cut.
+    """
+    tmp = path.with_suffix(".csv.tmp")
+    with tmp.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp.replace(path)
+
+
+def reconcile(out_root: Path, manifest_path: Path) -> tuple[list[dict], set[str]]:
+    """Make disk and manifest agree before fetching anything.
+
+    Resuming an interrupted run can find two kinds of inconsistency:
+
+    * a manifest row whose image is missing -- harmless, just drop the row and
+      let the fetcher re-download it;
+    * an image with no manifest row -- **not** harmless. Its licence and
+      attribution are unrecoverable from the filename, so it cannot legally be
+      redistributed or trained on. These are deleted so the fetcher re-acquires
+      them with provenance intact.
+
+    Deleting is the conservative choice: a silently unattributable image is worse
+    than the few seconds it costs to fetch it again.
+    """
+    if not out_root.exists():
+        return [], set()
+
+    on_disk: dict[str, Path] = {
+        p.stem.removeprefix("gbif_"): p
+        for d in out_root.iterdir() if d.is_dir()
+        for p in d.glob("gbif_*.jpg")
+    }
+
+    rows: list[dict] = []
+    if manifest_path.exists():
+        with manifest_path.open() as f:
+            rows = list(csv.DictReader(f))
+
+    keyed = {str(r["gbif_key"]): r for r in rows}
+    kept = [r for r in rows if str(r["gbif_key"]) in on_disk]
+    orphans = set(on_disk) - set(keyed)
+
+    for key in orphans:
+        on_disk[key].unlink()
+
+    if rows or on_disk:
+        print(f"Resuming: {len(kept)} images with attribution retained")
+        if len(rows) - len(kept):
+            print(f"          {len(rows) - len(kept)} manifest rows dropped (file missing)")
+        if orphans:
+            print(f"          {len(orphans)} unattributable images deleted (no manifest row)")
+        print()
+
+    return kept, {str(r["gbif_key"]) for r in kept}
+
+
 def run(args: argparse.Namespace) -> None:
     out_root = Path(args.out)
     if args.any_licence:
@@ -269,35 +340,33 @@ def run(args: argparse.Namespace) -> None:
     # drop provenance for previously-fetched images, and attribution data that no
     # longer maps to a file on disk is not recoverable.
     manifest_path = out_root / "manifest.csv"
-    manifest_rows: list[dict] = []
-    known_keys: set[str] = set()
-    if manifest_path.exists():
-        with manifest_path.open() as f:
-            for row in csv.DictReader(f):
-                if (out_root / row["class"] / f"gbif_{row['gbif_key']}.jpg").exists():
-                    manifest_rows.append(row)
-                    known_keys.add(str(row["gbif_key"]))
-        print(f"Existing manifest: {len(manifest_rows)} images retained\n")
+    manifest_rows, known_keys = reconcile(out_root, manifest_path)
 
     for sp, target in plans:
         dest = out_root / sp.folder
         dest.mkdir(parents=True, exist_ok=True)
 
-        have = len([p for p in dest.glob("gbif_*.jpg")])
+        # Count from the manifest, not the directory: reconcile() has already
+        # removed anything unattributed, so these agree, but counting attributed
+        # rows is the meaningful number.
+        have = sum(1 for r in manifest_rows if r["class"] == sp.folder)
         if have >= target:
             print(f"  {sp.folder:<18} {have} already present, target {target} -- skipping")
             continue
 
+        # Harvest the full target, then subtract what we have: GBIF paging is not
+        # stable enough to assume "skip the first N" lands on unseen records.
         records = harvest_records(
             sp, target, regional=not args.global_only, licences=licences
         )
         if args.regional_only:
             records = [r for r in records if r["regional"]]
-        # Drop anything already downloaded so the progress count reflects real work.
-        records = [r for r in records if str(r["gbif_key"]) not in known_keys]
+        records = [r for r in records if str(r["gbif_key"]) not in known_keys][: target - have]
         if not records:
             print(f"  {sp.folder:<18} {have} present, nothing new to fetch")
             continue
+        if have:
+            print(f"  {sp.folder:<18} {have} present, fetching {len(records)} more")
 
         ok = 0
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -308,22 +377,21 @@ def run(args: argparse.Namespace) -> None:
                 if success:
                     ok += 1
                     manifest_rows.append({**rec, "species": sp.label, "class": sp.folder})
+                    # Flush often: an image on disk with no attribution row is
+                    # unusable, because licence provenance cannot be recovered
+                    # from a filename. FLUSH_EVERY bounds how many images an
+                    # abrupt kill can orphan. The write is atomic and cheap
+                    # relative to fetching images over the network.
+                    if ok % FLUSH_EVERY == 0:
+                        write_manifest(manifest_path, manifest_rows)
                 print(f"\r  {sp.folder:<18} {ok}/{len(records)} downloaded", end="", flush=True)
+
+        write_manifest(manifest_path, manifest_rows)
         n_regional = sum(1 for r in manifest_rows if r["class"] == sp.folder and r["regional"])
         print(f"\r  {sp.folder:<18} {ok}/{len(records)} downloaded ({n_regional} regional)")
 
-    manifest = manifest_path
-    with manifest.open("w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["class", "species", "gbif_key", "license", "rights_holder",
-                        "recorded_by", "country", "lat", "lon", "event_date",
-                        "regional", "url"],
-        )
-        writer.writeheader()
-        writer.writerows(manifest_rows)
-
-    print(f"\nManifest: {manifest}  ({len(manifest_rows)} images)")
+    write_manifest(manifest_path, manifest_rows)
+    print(f"\nManifest: {manifest_path}  ({len(manifest_rows)} images)")
     lic_counts = Counter(r["license"] for r in manifest_rows)
     print("\nLicences downloaded:")
     for lic, n in lic_counts.most_common():

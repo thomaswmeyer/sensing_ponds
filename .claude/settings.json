@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('src/fetch_gbif.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(.venv/bin/python src/fetch_gbif.py --out data/gbif --per-species 1200 --dry-run)",
+      "Bash(.venv/bin/python src/fetch_gbif.py --out data/gbif --per-species 1200)"
+    ]
+  }
+}
