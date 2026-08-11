@@ -81,39 +81,35 @@ Writes `data/gbif/manifest.csv` with licence, attribution, country, coordinates 
 
 | Filter | Why |
 |---|---|
-| `license=CC0_1_0,CC_BY_4_0` | Safe for a distributed product. NC blocks commercial use; ND blocks derivatives. |
+| `license=CC0_1_0,CC_BY_4_0,CC_BY_NC_4_0` | **This is a non-commercial, open-source project, so NC is usable.** ND is still excluded — a model trained on an image is plausibly a derivative work. |
 | `mediaType=StillImage` | Occurrence records without photos are useless here |
 | `basisOfRecord=HUMAN_OBSERVATION` | Excludes `PRESERVED_SPECIMEN` — herbarium sheets, which look nothing like a field photo |
 | `hasCoordinate=true` | Needed to identify regional records |
 
-`--any-licence` widens to NC/ND. **That is a legal decision, not a technical one** — do not use it for anything shipped.
+**Including NC is worth roughly 5× the data**, and regional counts triple — which matters more, since regional records are the held-out test set:
 
-### Realistic yields
+| Class | Global (CC0+BY) | Global (+NC) | Regional (CC0+BY) | Regional (+NC) |
+|---|---|---|---|---|
+| water_hyacinth | 3,538 | **19,352** | 527 | **1,584** |
+| duckweed | 2,335 | **11,070** | 11 | **23** |
+| water_lettuce | 1,660 | **9,190** | 196 | **569** |
+| salvinia | 428 | **2,041** | 24 | **93** |
 
-Counts after all filters (checked 2026-08-11):
+`--commercial-safe` drops back to CC0 + CC-BY, costing ~80% of the data. **Use it if this project ever takes on a commercial dimension** — retraining from a narrower pool is far cheaper than discovering the constraint after release.
 
-| Class | Global | Regional (IN + LK) |
-|---|---|---|
-| water_hyacinth | 3,538 | 527 |
-| duckweed | 2,335 | 11 |
-| water_lettuce | 1,660 | 196 |
-| salvinia | 428 | 24 |
+`--any-licence` removes the filter entirely, including ND. Not recommended.
 
-Note how much the filters cost: *Pontederia crassipes* has ~22,500 imaged occurrences, but only 3,538 survive the licence and basis-of-record filters. `--dry-run` reports the honest number.
+### Known weaknesses
 
-**Duckweed's 11 regional images are a known weakness.** Its test metrics will be unreliable, and the training script warns about it.
+**Duckweed has only 23 regional images** even with NC included. Its test metrics will be unreliable, and the training script warns about it.
 
-## 3. PPCC water quality (satellite track)
+**The `basisOfRecord` filter is expensive in South Asia.** *Monochoria vaginalis* drops from 1,281 records to 6 — nearly all its regional records are herbarium specimens. Licensing is not the constraint there; the filter is. This is why *Monochoria* was dropped as a class entirely rather than substituted.
 
-Unrelated to the classifier — in-situ measurements for the Sentinel-2 pipeline.
+### Re-running is incremental
 
-```bash
-.venv/bin/python scripts/fetch_ppcc.py --years 2023 2024 2025 2026
-```
+Images already on disk are not re-downloaded, and existing `manifest.csv` rows are carried forward as long as their file still exists. A class already at its target is skipped.
 
-Scrapes monthly PDFs from the Puducherry PCC into `data/ppcc_surface_water.csv`, keyed by `(station, year, month)` to join against the Earth Engine export in [`gee/pondy_water.js`](../gee/pondy_water.js). The source site is slow and drops connections; downloads are cached and retried, so re-running only fetches what is missing.
-
-The CSV **is** committed (it is small and is a modelling input); the source PDFs are not.
+⚠️ **Do not delete `manifest.csv` while keeping the images.** Attribution data cannot be reconstructed from filenames — the images become unusable for redistribution. If it is ever lost, delete the images too and re-fetch.
 
 ## How the data is split
 
@@ -164,8 +160,7 @@ python3 -m venv .venv
 
 # 1. Manual: download Mendeley -> data/mendeley/
 # 2. Scripted:
-.venv/bin/python src/fetch_gbif.py --out data/gbif --per-species 900
-.venv/bin/python scripts/fetch_ppcc.py --years 2023 2024 2025 2026
+.venv/bin/python src/fetch_gbif.py --out data/gbif --per-species 1200
 
 .venv/bin/python src/train_mobile_classifier.py \
     --data-root data/mendeley data/gbif --export-tflite
@@ -176,8 +171,9 @@ python3 -m venv .venv
 | Dataset | Licence | Obligation |
 |---|---|---|
 | WaterHyacinth (Mendeley) | CC BY 4.0 | Cite [Data in Brief, 2023](https://www.sciencedirect.com/science/article/pii/S2352340923009320) |
-| GBIF occurrences | CC0 / CC BY 4.0 | Attribute per-image via `manifest.csv` |
+| GBIF occurrences | CC0 / CC BY / **CC BY-NC** | Attribute per-image via `manifest.csv` |
 | AqUavplant (not yet used) | CC BY 4.0 | Cite [Scientific Data, 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11661991/) |
-| PPCC | Indian government publication | Cite the source |
+
+**The training data includes CC-BY-NC images, so the resulting model is non-commercial.** That is a deliberate choice for this open-source, crowdsourced project — it buys ~5× the data. If the project ever needs a commercially usable model, re-fetch with `--commercial-safe` and retrain.
 
 If a trained model is redistributed, ship `manifest.csv` with it. A model trained on CC-BY images is plausibly a derivative work, and attribution is the condition of use.

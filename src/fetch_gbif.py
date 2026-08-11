@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +34,19 @@ from pathlib import Path
 API = "https://api.gbif.org/v1/occurrence/search"
 PAGE = 300  # GBIF max limit per request
 
-# Licences safe for a distributed commercial product. NC and ND are excluded:
-# CC-BY-NC blocks commercial use, ND blocks derivative works (a trained model
-# is arguably derivative). Widening this is a legal decision, not a technical one.
-SAFE_LICENCES = ["CC0_1_0", "CC_BY_4_0"]
+# This is a non-commercial, open-source, crowdsourced project, so CC-BY-NC is
+# usable and is included by default. It is worth roughly 5x the data: hyacinth
+# 3.5k -> 19k global, and regional counts triple (527 -> 1584), which matters
+# more since regional records are the held-out test set.
+#
+# ND is still excluded throughout: a model trained on an image is plausibly a
+# derivative work, and no-derivatives forbids that regardless of commerce.
+#
+# --commercial-safe drops back to CC0 + CC-BY. Use it if this project ever takes
+# on a commercial dimension -- retraining from a narrower pool is far cheaper
+# than discovering the constraint after release.
+DEFAULT_LICENCES = ["CC0_1_0", "CC_BY_4_0", "CC_BY_NC_4_0"]
+COMMERCIAL_SAFE_LICENCES = ["CC0_1_0", "CC_BY_4_0"]
 
 # Deployment region. GBIF ISO country codes.
 REGION = ["IN", "LK"]
@@ -121,7 +131,7 @@ def api_get(params: dict, retries: int = 4) -> dict:
     raise AssertionError("unreachable")
 
 
-def base_query(sp: Species, regional: bool, safe_licences: bool) -> dict:
+def base_query(sp: Species, regional: bool, licences: list[str] | None) -> dict:
     q = {
         "taxonKey": sp.taxon_key,
         "mediaType": "StillImage",
@@ -132,16 +142,16 @@ def base_query(sp: Species, regional: bool, safe_licences: bool) -> dict:
     }
     if regional:
         q["country"] = REGION
-    if safe_licences:
-        q["license"] = SAFE_LICENCES
+    if licences:
+        q["license"] = licences
     return q
 
 
-def count_for(sp: Species, regional: bool, safe_licences: bool) -> int:
-    return api_get({**base_query(sp, regional, safe_licences), "limit": 0})["count"]
+def count_for(sp: Species, regional: bool, licences: list[str] | None) -> int:
+    return api_get({**base_query(sp, regional, licences), "limit": 0})["count"]
 
 
-def harvest_records(sp: Species, target: int, regional: bool, safe_licences: bool) -> list[dict]:
+def harvest_records(sp: Species, target: int, regional: bool, licences: list[str] | None) -> list[dict]:
     """Page through occurrences, preferring regional records.
 
     Regional images are pulled first and topped up globally. A model trained
@@ -159,7 +169,7 @@ def harvest_records(sp: Species, target: int, regional: bool, safe_licences: boo
         offset = 0
         while len(out) < target:
             data = api_get({
-                **base_query(sp, regional_pass, safe_licences),
+                **base_query(sp, regional_pass, licences),
                 "limit": PAGE,
                 "offset": offset,
             })
@@ -223,9 +233,14 @@ def download_one(rec: dict, dest: Path) -> tuple[bool, str]:
 
 def run(args: argparse.Namespace) -> None:
     out_root = Path(args.out)
-    safe = not args.any_licence
+    if args.any_licence:
+        licences, desc = None, "ALL (includes ND -- review before any redistribution)"
+    elif args.commercial_safe:
+        licences, desc = COMMERCIAL_SAFE_LICENCES, "CC0 + CC-BY (commercial-safe)"
+    else:
+        licences, desc = DEFAULT_LICENCES, "CC0 + CC-BY + CC-BY-NC (non-commercial project)"
 
-    print(f"Licences: {'CC0 / CC-BY only' if safe else 'ALL (review before shipping)'}")
+    print(f"Licences: {desc}")
     print(f"Region:   {'IN + LK only' if args.regional_only else 'regional-first, global top-up'}")
     print()
 
@@ -233,9 +248,9 @@ def run(args: argparse.Namespace) -> None:
     print("-" * 63)
     plans: list[tuple[Species, int]] = []
     for sp in SPECIES:
-        g = count_for(sp, False, safe)
+        g = count_for(sp, False, licences)
         time.sleep(0.3)
-        r = count_for(sp, True, safe)
+        r = count_for(sp, True, licences)
         time.sleep(0.3)
         available = r if args.regional_only else g
         plans.append((sp, min(args.per_species, available)))
@@ -248,16 +263,41 @@ def run(args: argparse.Namespace) -> None:
         return
 
     print()
+
+    # Re-runs are incremental. download_one() skips files already on disk, but the
+    # manifest must also carry forward: rebuilding it from this run alone would
+    # drop provenance for previously-fetched images, and attribution data that no
+    # longer maps to a file on disk is not recoverable.
+    manifest_path = out_root / "manifest.csv"
     manifest_rows: list[dict] = []
+    known_keys: set[str] = set()
+    if manifest_path.exists():
+        with manifest_path.open() as f:
+            for row in csv.DictReader(f):
+                if (out_root / row["class"] / f"gbif_{row['gbif_key']}.jpg").exists():
+                    manifest_rows.append(row)
+                    known_keys.add(str(row["gbif_key"]))
+        print(f"Existing manifest: {len(manifest_rows)} images retained\n")
+
     for sp, target in plans:
         dest = out_root / sp.folder
         dest.mkdir(parents=True, exist_ok=True)
 
+        have = len([p for p in dest.glob("gbif_*.jpg")])
+        if have >= target:
+            print(f"  {sp.folder:<18} {have} already present, target {target} -- skipping")
+            continue
+
         records = harvest_records(
-            sp, target, regional=not args.global_only, safe_licences=safe
+            sp, target, regional=not args.global_only, licences=licences
         )
         if args.regional_only:
             records = [r for r in records if r["regional"]]
+        # Drop anything already downloaded so the progress count reflects real work.
+        records = [r for r in records if str(r["gbif_key"]) not in known_keys]
+        if not records:
+            print(f"  {sp.folder:<18} {have} present, nothing new to fetch")
+            continue
 
         ok = 0
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -272,7 +312,7 @@ def run(args: argparse.Namespace) -> None:
         n_regional = sum(1 for r in manifest_rows if r["class"] == sp.folder and r["regional"])
         print(f"\r  {sp.folder:<18} {ok}/{len(records)} downloaded ({n_regional} regional)")
 
-    manifest = out_root / "manifest.csv"
+    manifest = manifest_path
     with manifest.open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
@@ -284,9 +324,21 @@ def run(args: argparse.Namespace) -> None:
         writer.writerows(manifest_rows)
 
     print(f"\nManifest: {manifest}  ({len(manifest_rows)} images)")
+    lic_counts = Counter(r["license"] for r in manifest_rows)
+    print("\nLicences downloaded:")
+    for lic, n in lic_counts.most_common():
+        print(f"  {lic or '(unspecified)':<28} {n}")
+    if any("NC" in (l or "") for l in lic_counts):
+        print(
+            "  NOTE: NC-licensed images are included. This dataset and any model\n"
+            "  trained on it are non-commercial. Re-run with --commercial-safe if\n"
+            "  that ever changes."
+        )
+
     print(
-        "\nATTRIBUTION: CC-BY images require crediting rights_holder / recorded_by.\n"
-        "Keep manifest.csv with any redistributed model or dataset.\n"
+        "\nATTRIBUTION: CC-BY and CC-BY-NC images require crediting\n"
+        "rights_holder / recorded_by. Keep manifest.csv with any redistributed\n"
+        "model or dataset.\n"
         "\nNEXT: review a sample by eye before training. Citizen-science photos\n"
         "include herbarium sheets, close-ups of flowers, habitat shots with no\n"
         "plant visible, and occasional misidentifications."
@@ -303,8 +355,12 @@ def parse_args() -> argparse.Namespace:
                    help="India + Sri Lanka only (small but on-domain)")
     p.add_argument("--global-only", action="store_true",
                    help="Skip regional prioritisation")
+    p.add_argument("--commercial-safe", action="store_true",
+                   help="CC0 + CC-BY only, dropping NC. Costs ~80%% of the data; "
+                        "use only if this project takes on a commercial dimension")
     p.add_argument("--any-licence", action="store_true",
-                   help="Include NC/ND licences -- NOT safe for a shipped product")
+                   help="No licence filter at all, including ND. A model is "
+                        "plausibly a derivative work, so ND is a real problem")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--dry-run", action="store_true", help="Print counts only")
     return p.parse_args()
