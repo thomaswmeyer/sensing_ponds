@@ -1,12 +1,12 @@
 # Custom minimal ONNX Runtime Web build.
 #
 # Compiles ORT to WASM with only the operator kernels this project's model needs
-# -- 7 operator groups instead of the several hundred in the stock build.
-# Expected ~3 MB raw / ~1 MB gzipped, against 13.5 MB / 3.5 MB stock.
+# -- 5 operator groups instead of the several hundred in the stock build.
+# Expected ~3 MB raw / ~1 MB gzipped, against 12.86 MB / 3.28 MB stock.
 #
-# Pinned to ORT v1.20.1 to match the onnxruntime-web version in web/package.json.
+# Pinned to ORT v1.27.0 to match the onnxruntime-web version in web/package.json.
 # The JS glue and the WASM binary are a matched pair -- mixing versions fails at
-# runtime with unhelpful errors.
+# runtime with unhelpful errors. If you bump one, bump the other.
 #
 # Build takes 1-3 hours on first run: it compiles emsdk, protobuf and ORT itself.
 # See tools/ort-minimal/README.md.
@@ -40,20 +40,37 @@ USER builder
 WORKDIR /src
 
 # Shallow clone with submodules: the full history is ~4 GB and unnecessary.
-ARG ORT_VERSION=v1.20.1
+ARG ORT_VERSION=v1.27.0
 RUN git clone --depth 1 --branch ${ORT_VERSION} --recursive \
       https://github.com/microsoft/onnxruntime.git
 
 # The operator config generated from our model. Regenerate whenever the model
-# ARCHITECTURE changes -- weights do not matter, but a different backbone or a
-# change between fp32 and INT8 alters the op set and invalidates this build.
+# ARCHITECTURE or PRECISION changes -- weights do not matter, but a different
+# backbone, or a change between fp16 and fp32, alters the op set and invalidates
+# this build. See the header of the config file for how to regenerate it.
 COPY --chown=builder:builder required_operators_and_types.config /src/ops.config
 
 WORKDIR /src/onnxruntime
 
 # --minimal_build extended:
-#     Drops the ONNX format parser and runtime optimisers. Requires .ort format
-#     models, which is why the training export must emit one.
+#     Drops the ONNX format parser and the full optimiser set. Requires .ort
+#     format models, which is why the export step must emit one.
+# --enable_runtime_optimizations:
+#     REQUIRED, and not merely a tuning knob -- without it this build throws
+#     away the entire fp16 saving.
+#
+#     ORT's CPU execution provider has no fp16 kernels, so it upcasts every
+#     fp16 initialiser to float32 during graph optimisation. On the normal
+#     .onnx path that happens in memory at session creation, so the DOWNLOAD
+#     stays fp16 and only RAM holds float32. But .ort format serialises the
+#     post-optimisation graph, which bakes that upcast into the file: converting
+#     our 2.69 MB gz fp16 model with fixed optimisations yields a 3.45 MB gz
+#     .ort -- bigger than the fp32 ONNX we replaced.
+#
+#     Runtime optimisations defer fusion and the upcast to session creation, so
+#     the .ort keeps fp16 weights on disk: 2.73 MB gz, matching the ONNX. The
+#     op config must be the matching .with_runtime_opt.config, which is what
+#     tools/ort-minimal/required_operators_and_types.config now holds.
 # --include_ops_by_config:
 #     Compiles only the kernels our model uses.
 # --enable_reduced_operator_type_support:
@@ -67,6 +84,7 @@ RUN ./build.sh \
       --config MinSizeRel \
       --build_wasm \
       --minimal_build extended \
+      --enable_runtime_optimizations \
       --include_ops_by_config /src/ops.config \
       --enable_reduced_operator_type_support \
       --disable_ml_ops \

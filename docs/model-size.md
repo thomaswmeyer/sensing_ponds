@@ -145,50 +145,51 @@ Requires `onnxconverter-common`.
 2. **Quantisation-aware training** — the model learns to tolerate quantisation noise. Most reliable, most work.
 3. **`mobilenetv3_small_075` / smaller input** — cheap to try, costs accuracy on an already-small model.
 
-## Possible: custom minimal ORT build
+## In progress: custom minimal ORT build
 
-**The model uses 11 distinct operators.** The stock runtime carries hundreds.
+Now the largest remaining item. With the model at 2.69 MB gzipped, the 3.28 MB runtime is the bigger half of the payload again, and the precondition for this work — a settled architecture — is finally met.
+
+**The fp16 model needs 5 operator groups.** The stock runtime carries several hundred kernels across all supported types:
 
 ```
-fp32: Conv, Identity, HardSwish, Relu, ReduceMean,
-      HardSigmoid, Mul, Add, GlobalAveragePool, Flatten, Gemm
-
-int8: adds DynamicQuantizeLinear, Cast, Reshape,
-      ConvInteger, MatMulInteger
+ai.onnx;1;GlobalAveragePool
+ai.onnx;6;HardSigmoid
+ai.onnx;11;Conv
+ai.onnx;13;Cast{MLFloat16, float},Flatten,Gemm,ReduceMean
+ai.onnx;14;Add,Mul,Relu
 ```
 
-[ONNX Runtime supports building with only required kernels](https://onnxruntime.ai/docs/build/custom.html):
+`HardSwish` is absent because ORT decomposes it into `HardSigmoid` + `Mul`. Tooling lives in [`tools/ort-minimal/`](../tools/ort-minimal/); **expected ~3 MB raw, ~1 MB gzipped — a further ~2.3 MB off the wire.**
 
-```bash
-# 1. Config listing only the operators our model needs
-python tools/python/create_reduced_build_config.py \
-    --format ORT model.onnx > required_ops.config
+### The fp16 trap: `.ort` conversion can undo the model saving
 
-# 2. Convert to ORT format (required by minimal builds)
-python -m onnxruntime.tools.convert_onnx_models_to_ort \
-    --enable_type_reduction model.onnx
+**ORT's CPU execution provider has no fp16 kernels.** It upcasts every fp16 initialiser to float32 during graph optimisation. On the normal `.onnx` path that happens in memory at session creation, so the download stays fp16 and only RAM holds float32 — which is why fp16 works today with no runtime changes at all.
 
-# 3. Build
-./build.sh --build_wasm --minimal_build extended \
-    --include_ops_by_config required_ops.config \
-    --enable_reduced_operator_type_support \
-    --config MinSizeRel --disable_ml_ops --disable_rtti
-```
+But **`.ort` format serialises the post-optimisation graph**, baking that upcast into the file:
 
-**Expected: ~3 MB raw, roughly 1 MB gzipped** — a further ~2.5 MB off the wire.
+| | Raw | Gzipped |
+|---|---|---|
+| fp16 `.onnx` (ships today) | 2.94 MB | **2.69 MB** |
+| `.ort`, fixed optimisations | 5.99 MB | **3.45 MB** ← *worse than the fp32 we replaced* |
+| `.ort`, runtime optimisations | 3.11 MB | **2.73 MB** ✅ |
+
+Naively adopting the minimal build would have cost 0.76 MB on the model to save 2.3 MB on the runtime — silently, with byte-identical logits and no error anywhere. `--enable_runtime_optimizations` defers fusion and the upcast to session creation, keeping fp16 on disk.
+
+Two things must stay in step or the saving evaporates: the build flag, and using the **`.with_runtime_opt.config`** op config (the plain one bakes in `FusedConv` and a float32-only `Conv`). Both are documented in [`tools/ort-minimal/README.md`](../tools/ort-minimal/README.md).
 
 ### What it costs
 
-- **Build infrastructure.** Requires Emscripten and a full ORT source build — hours on first run, and a Docker image to keep it reproducible.
-- **Rebuild on every architecture change.** Swapping to `efficientnet_lite0` changes the operator set and invalidates the build. The INT8 op set differs from fp32, so the quantisation decision must be final first.
-- **ORT format models.** Minimal builds cannot load `.onnx`; the training script's export step would need to emit `.ort` too.
-- **A binary in the repo.** The custom WASM cannot be fetched from npm — it has to be committed or built in CI.
+- **Build infrastructure.** Emscripten plus a full ORT source build — 1–3 hours on first run, kept reproducible by a Docker image.
+- **Rebuild on every architecture *or precision* change.** Swapping the backbone, or moving between fp16 / fp32 / INT8, changes the op set and invalidates the build.
+- **ORT format models.** Minimal builds cannot load `.onnx`; the export step must emit `.ort` as well.
+- **A binary in the repo.** The custom WASM cannot come from npm — commit it or build it in CI.
+- **Version lockstep.** The custom `.mjs` glue and binary are a matched pair with `onnxruntime-web` in `web/package.json`. Both are on v1.27.0.
 
 ### Recommendation
 
-**Not yet.** Do it when the model architecture is settled and 2.5 MB is worth a reproducible build pipeline. Until then it would need rebuilding on every experiment, and the model is not final — the four-class set may change, and INT8 accuracy is unverified.
+**Worth doing now**, for the first time. The model is settled at fp16, so the config will not churn, and 2.3 MB is a third of the first load on a rural connection.
 
-The `/wasm` entry point captured most of the available saving for a one-line change.
+The `/wasm` entry point captured the larger share for a one-line change; this is the second-order optimisation.
 
 ## Other levers
 
