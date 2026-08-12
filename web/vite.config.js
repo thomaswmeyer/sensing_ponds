@@ -1,10 +1,16 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import basicSsl from '@vitejs/plugin-basic-ssl'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
   plugins: [
     react(),
+    // HTTPS with a self-signed certificate. Not optional for phone testing:
+    // getUserMedia and the service worker are both restricted to secure
+    // contexts, and while localhost counts as secure, a LAN address does not.
+    // Without this, iOS Safari silently refuses camera access.
+    basicSsl(),
     VitePWA({
       registerType: 'prompt',
       // The app must work in the field with no connectivity, so everything it

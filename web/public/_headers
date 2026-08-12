@@ -1,0 +1,31 @@
+# Cloudflare Pages header rules. Copied verbatim into dist/ by Vite.
+#
+# Content-Type is NOT set here: Pages already serves .wasm as application/wasm
+# and .onnx as a binary type, and Brotli-compresses both in transit.
+
+# Hashed build assets are immutable -- the filename changes when the content
+# does, so they can be cached indefinitely.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The model is NOT content-hashed: retraining overwrites plants.onnx at the same
+# path. Caching it immutably would pin field devices to a stale classifier with
+# no way to invalidate. must-revalidate keeps the cheap 304 while letting a new
+# model land. The service worker precaches it anyway, so this is only consulted
+# on the revalidation request, not on every identification.
+/model/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+# The service worker must never be served stale, or clients pin themselves to an
+# old precache manifest and stop receiving updates entirely.
+/sw.js
+  Cache-Control: public, max-age=0, must-revalidate
+/registerSW.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  # The app takes photos and geolocation. Deny everything not used, and scope
+  # camera/geolocation to same-origin so an injected iframe cannot reach them.
+  Permissions-Policy: camera=(self), geolocation=(self), microphone=(), payment=(), usb=()

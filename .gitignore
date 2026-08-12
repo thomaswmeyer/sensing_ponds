@@ -33,7 +33,12 @@ dist/
 web/dist/
 web/dev-dist/
 
-# Large binary assets fetched separately -- see web/public/ASSETS-NEEDED.md
-web/public/model/*.onnx
+# Large binary assets fetched separately -- see web/ASSETS-NEEDED.md
 web/public/fonts/*.woff2
 web/public/audio/
+
+# ...but the deployed classifier IS tracked, via LFS. Deployment builds from a
+# clean checkout, so an untracked model means shipping a site whose only
+# function does not work. This is the one .onnx exempted from the blanket rule
+# above -- training checkpoints under runs/ stay ignored.
+!web/public/model/plants.onnx
