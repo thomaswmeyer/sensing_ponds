@@ -8,6 +8,21 @@ import { classify, loadModel } from './lib/inference.js'
 import { countPending, enqueue, OutboxFullError } from './lib/outbox.js'
 
 /**
+ * Whether to ask for the user's location on capture.
+ *
+ * Off for now: nothing is uploaded yet, so the coordinates would sit unused in
+ * the local outbox and the permission prompt would be asking for a lot in
+ * exchange for nothing. Asking early also spends the one good chance we get --
+ * a denied prompt is sticky per-origin, and a user who refuses now cannot be
+ * re-asked without digging through browser settings, so a premature ask can
+ * permanently cost us the location data once upload does exist.
+ *
+ * Flip to true when the upload path lands. Everything downstream already
+ * handles a null position, because that is what a denied prompt produces.
+ */
+const COLLECT_POSITION = false
+
+/**
  * Requests a position without ever blocking the result screen.
  *
  * A cold GPS fix takes 2-15 seconds; inference takes milliseconds. Serialising
@@ -17,6 +32,7 @@ import { countPending, enqueue, OutboxFullError } from './lib/outbox.js'
  */
 function requestPosition() {
   return new Promise((resolve) => {
+    if (!COLLECT_POSITION) return resolve(null)
     if (!navigator.geolocation) return resolve(null)
     navigator.geolocation.getCurrentPosition(
       (pos) =>

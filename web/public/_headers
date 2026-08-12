@@ -26,6 +26,8 @@
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
-  # The app takes photos and geolocation. Deny everything not used, and scope
-  # camera/geolocation to same-origin so an injected iframe cannot reach them.
-  Permissions-Policy: camera=(self), geolocation=(self), microphone=(), payment=(), usb=()
+  # Deny everything the app does not use, and scope what it does to same-origin
+  # so an injected iframe cannot reach it. geolocation is denied outright while
+  # COLLECT_POSITION is false in App.jsx -- keep the two in step, since this
+  # header blocks the API regardless of what the code asks for.
+  Permissions-Policy: camera=(self), geolocation=(), microphone=(), payment=(), usb=()
