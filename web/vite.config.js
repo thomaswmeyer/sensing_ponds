@@ -13,13 +13,19 @@ export default defineConfig({
     basicSsl(),
     VitePWA({
       registerType: 'prompt',
-      // The app must work in the field with no connectivity, so everything it
-      // needs is precached on first load: the model, the ONNX runtime's WASM,
-      // the Tamil font, and the recorded audio.
-      includeAssets: ['fonts/*.woff2', 'model/*', 'audio/**/*'],
+      // NB: no `includeAssets` here. It and globPatterns are independent inputs
+      // to the same precache list and do NOT deduplicate -- listing the fonts,
+      // model and config in both put every one of them in the manifest twice,
+      // which meant re-downloading the 5.8 MB model a second time on install.
+      // globPatterns below already covers everything, audio included.
       workbox: {
         // Default is 2 MB; the ONNX model and the WASM runtime both exceed it.
         maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
+        // The app must work in the field with no connectivity, so everything it
+        // needs is precached on first load: the app shell, the model, the Tamil
+        // fonts, the icons, and the recorded audio.
+        // No png/webmanifest here either: the plugin adds the manifest and the
+        // icons it references on its own, so globbing them duplicates them too.
         globPatterns: ['**/*.{js,css,html,woff2,onnx,json,opus,mp3}'],
         globIgnores: [
           // The threaded/JSEP build is ~27 MB and needs cross-origin isolation
