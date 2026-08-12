@@ -29,11 +29,14 @@ const CONFIG_URL = '/model/model_config.json'
 let sessionPromise = null
 let config = null
 
-// Single-threaded WASM only. The threaded build is ~27 MB and needs
-// cross-origin isolation (COOP/COEP) to use SharedArrayBuffer; without those
-// headers it downloads and then silently falls back to one thread anyway. On a
-// field connection that is a lot of data for no benefit. This model is small
-// enough that single-threaded inference is a few milliseconds regardless.
+// Run the WASM runtime on a single thread. Note this does NOT select a smaller
+// binary: onnxruntime-web ships only `-threaded` builds, so
+// ort-wasm-simd-threaded.wasm (12.86 MB raw, ~3.3 MB brotli) is what loads
+// either way. What this avoids is the SharedArrayBuffer thread pool, which
+// needs cross-origin isolation (COOP/COEP) we do not set -- without those
+// headers ORT falls back to one thread regardless, so this just makes the
+// actual behaviour explicit. The model is small enough that single-threaded
+// inference is a few milliseconds.
 ort.env.wasm.numThreads = 1
 ort.env.wasm.simd = true
 

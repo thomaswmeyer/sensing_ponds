@@ -20,21 +20,38 @@ export default defineConfig({
       // globPatterns below already covers everything, audio included.
       workbox: {
         // Default is 2 MB; the ONNX model and the WASM runtime both exceed it.
-        maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
+        // The runtime is the binding constraint at 12.86 MB raw -- Workbox
+        // compares against the UNCOMPRESSED size, so this must clear 12.86 even
+        // though only ~3.3 MB crosses the wire after brotli. Workbox drops
+        // oversized files from the manifest with a build-log warning and no
+        // error, so a cap set too low fails silently and only shows up as an app
+        // that cannot classify offline.
+        maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
         // The app must work in the field with no connectivity, so everything it
         // needs is precached on first load: the app shell, the model, the Tamil
         // fonts, the icons, and the recorded audio.
         // No png/webmanifest here either: the plugin adds the manifest and the
         // icons it references on its own, so globbing them duplicates them too.
-        globPatterns: ['**/*.{js,css,html,woff2,onnx,json,opus,mp3}'],
+        // The WASM runtime and its loader glue must be precached like everything
+        // else. There is no separate single-threaded ORT binary to prefer: since
+        // ~1.19, onnxruntime-web ships only `-threaded` builds, and
+        // `ort-wasm-simd-threaded.wasm` (13 MB raw, ~3.3 MB brotli) IS the
+        // single-threaded path -- `ort.env.wasm.numThreads = 1` in
+        // src/lib/inference.js makes it run on one thread without
+        // SharedArrayBuffer. Excluding it by name does not dodge a fatter build;
+        // it just leaves the app unable to classify offline, which is the one
+        // thing this app exists to do. Verify with a real airplane-mode install
+        // before trusting any change here.
+        globPatterns: ['**/*.{js,mjs,css,html,woff2,onnx,json,opus,mp3,wasm}'],
         globIgnores: [
-          // The threaded/JSEP build is ~27 MB and needs cross-origin isolation
-          // (COOP/COEP) to use its SharedArrayBuffer threads. We do not set those
-          // headers, so it would download and then fall back to single-threaded
-          // anyway -- 27 MB of a field user's data for nothing. The single-thread
-          // SIMD build is a few hundred KB and is what actually runs.
-          '**/ort-wasm-simd-threaded*.wasm',
-          '**/ort-*.mjs',
+          // The JSEP (WebGPU), asyncify and JSPI builds are 14-26 MB each and
+          // nothing imports them: src/lib/inference.js uses the
+          // `onnxruntime-web/wasm` entry point deliberately. If one of these ever
+          // appears in dist/, that import has regressed -- fix the import rather
+          // than widening this list.
+          '**/ort-wasm-simd-threaded.jsep.*',
+          '**/ort-wasm-simd-threaded.asyncify.*',
+          '**/ort-wasm-simd-threaded.jspi.*',
         ],
       },
       manifest: {
