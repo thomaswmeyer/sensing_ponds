@@ -38,6 +38,11 @@ export default defineConfig({
         ],
       },
       manifest: {
+        // Pin the app identity explicitly. Without `id`, the browser derives it
+        // from start_url, so ever changing start_url would orphan every existing
+        // install and reinstall as a separate app. Cheap to set now while there
+        // are no installs; impossible to change later without breaking them.
+        id: '/?app=pondy-plant-id',
         name: 'Pondy Plant ID',
         short_name: 'Plant ID',
         description: 'Identify floating water plants and record where they grow',
@@ -45,6 +50,7 @@ export default defineConfig({
         start_url: '/',
         display: 'standalone',
         orientation: 'portrait',
+        categories: ['education', 'utilities'],
         background_color: '#0b1f16',
         theme_color: '#0b1f16',
         icons: [
@@ -55,6 +61,32 @@ export default defineConfig({
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',
+          },
+        ],
+        // Chrome on Android only shows the richer install dialog -- the one with
+        // screenshots and the description, rather than a bare one-line bar --
+        // when at least one screenshot declares form_factor 'narrow'. Google
+        // measured install rates roughly doubling with it, which matters when a
+        // field tester is deciding whether to trust an unfamiliar link.
+        //
+        // Constraints, all of which Chrome enforces silently by just not showing
+        // the dialog: PNG or JPEG only, 320-3840px per side, longest side no more
+        // than 2.3x the shortest, and every 'narrow' entry must share one aspect
+        // ratio. Real device captures are the point -- see web/ASSETS-NEEDED.md.
+        screenshots: [
+          {
+            src: 'screenshots/capture.png',
+            sizes: '1080x2400',
+            type: 'image/png',
+            form_factor: 'narrow',
+            label: 'Point the camera at a floating plant',
+          },
+          {
+            src: 'screenshots/result.png',
+            sizes: '1080x2400',
+            type: 'image/png',
+            form_factor: 'narrow',
+            label: 'The plant is named in Tamil, with its uses',
           },
         ],
       },

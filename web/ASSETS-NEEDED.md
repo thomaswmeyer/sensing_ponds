@@ -34,6 +34,29 @@ glyphs are present but never combine.
 
 Re-run after adding a locale that needs other codepoints.
 
+## `screenshots/capture.png`, `screenshots/result.png`
+
+**Degrades: the Android install dialog.** With them, Chrome shows the richer
+install bottomsheet carrying the screenshots and description; without them it
+falls back to a bare one-line prompt. Google measured install rates roughly
+doubling with the richer UI, which matters when the person deciding is a field
+tester looking at an unfamiliar link.
+
+Take these on a real phone — the camera preview and the Tamil rendering are the
+whole point, and neither survives a headless capture. Drop them in
+`web/public/screenshots/`. Nothing breaks while they are absent; Chrome just
+uses the plain dialog.
+
+Chrome silently declines to show the dialog if these do not hold:
+
+- PNG or JPEG, **not** WebP
+- 320–3840 px per side, longest side ≤ 2.3× the shortest
+- every `narrow` entry shares one aspect ratio
+
+The manifest in `vite.config.js` declares `1080x2400`. If your phone captures at
+a different size, update `sizes` there to match — a wrong value is ignored
+rather than corrected.
+
 ## `audio/ta/*.opus` — the remaining blocker
 
 **Blocks: use by non-literate users.** Roughly 60–100 fixed strings.
