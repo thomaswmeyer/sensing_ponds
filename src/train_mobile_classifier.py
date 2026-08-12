@@ -28,6 +28,7 @@ import argparse
 import json
 import random
 import re
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -657,54 +658,88 @@ def build_model(args: argparse.Namespace, n_classes: int) -> nn.Module:
     return model
 
 
-def quantize_int8(onnx_path: Path) -> Path | None:
-    """Dynamic INT8 quantisation of the exported graph.
+# Ops kept in fp32 inside the otherwise-fp16 graph. Both accumulate over many
+# elements, where half-precision rounding compounds, and both hold a negligible
+# share of the weights -- so excluding them costs bytes we do not care about and
+# buys numerical stability we do.
+FP16_KEEP_FP32_OPS = ["GlobalAveragePool", "ReduceMean"]
 
-    Dynamic rather than static: static quantisation needs a calibration dataset
-    and gets marginally better accuracy, but dynamic needs nothing and the
-    weights are what dominate size here. Weights-only INT8 gets the 3.7x.
 
-    Returns None (with a warning) if onnx/onnxruntime are absent -- they are
-    optional deps, and training should not fail because the export tooling is
-    missing.
+def convert_fp16(onnx_path: Path) -> Path | None:
+    """Halve the weights: fp32 -> fp16, with fp32 kept at the graph boundary.
+
+    This replaced INT8, which was abandoned after every strategy collapsed to
+    near the 25% chance level -- hard-swish activation outliers dominate the
+    per-tensor activation scale, so the real signal lands in a handful of the
+    256 available levels (docs/model-size.md). fp16 does not share that failure
+    mode: it keeps 5 exponent bits, so those same outliers remain representable.
+    Measured on this model it costs nothing at all -- identical accuracy,
+    identical per-class F1, 100% prediction agreement -- for 2.70 MB off the
+    wire. src/compare_fp16.py reproduces that comparison.
+
+    keep_io_types=True is what makes this a drop-in swap: the graph still accepts
+    float32 and still emits float32 logits, with casts just inside the boundary,
+    so the client keeps sending the same Float32Array and needs no change.
+
+    Returns None (with a warning) if the converter is absent -- it is an optional
+    dep, and training should not fail because export tooling is missing.
     """
     try:
-        from onnxruntime.quantization import QuantType, quantize_dynamic
-        from onnxruntime.quantization.preprocess import quant_pre_process
+        import onnx
+        from onnxconverter_common import float16
     except ImportError:
         print(
-            "\nNOTE: onnx/onnxruntime not installed -- skipping INT8 quantisation.\n"
-            "      pip install onnx onnxruntime  (fp32 ONNX was still written)"
+            "\nNOTE: onnx/onnxconverter-common not installed -- skipping fp16 conversion.\n"
+            "      pip install onnx onnxconverter-common  (fp32 ONNX was still written)"
         )
         return None
 
-    prep = onnx_path.with_name(onnx_path.stem + "_prep.onnx")
-    int8_path = onnx_path.with_name(onnx_path.stem + "_int8.onnx")
+    fp16_path = onnx_path.with_name(onnx_path.stem + "_fp16.onnx")
 
-    quant_pre_process(str(onnx_path), str(prep), skip_symbolic_shape=True)
-    quantize_dynamic(str(prep), str(int8_path), weight_type=QuantType.QUInt8)
-    prep.unlink(missing_ok=True)
+    # The converter warns once per subnormal weight it flushes to the fp16 floor.
+    # Those are dead squeeze-excite channels -- the INT8 investigation confirmed
+    # they contribute nothing (their fp32 magnitudes run down to 1e-16). Dozens
+    # of warnings about weights the model already ignores would bury the real
+    # output, so they are counted and summarised instead.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = float16.convert_float_to_float16(
+            onnx.load(str(onnx_path)),
+            keep_io_types=True,
+            op_block_list=FP16_KEEP_FP32_OPS,
+        )
+    onnx.checker.check_model(model)
+    onnx.save(model, str(fp16_path))
 
     fp32_mb = onnx_path.stat().st_size / 1048576
-    int8_mb = int8_path.stat().st_size / 1048576
-    print(f"\nINT8:       {int8_path}")
-    print(f"            {fp32_mb:.2f} MB -> {int8_mb:.2f} MB ({fp32_mb / int8_mb:.1f}x smaller)")
-    return int8_path
+    fp16_mb = fp16_path.stat().st_size / 1048576
+    n_trunc = sum("truncated" in str(w.message) for w in caught)
+    print(f"\nfp16:       {fp16_path}")
+    print(f"            {fp32_mb:.2f} MB -> {fp16_mb:.2f} MB ({fp32_mb / fp16_mb:.1f}x smaller)")
+    print(f"            {n_trunc} subnormal weights flushed to the fp16 floor (dead SE channels)")
+    return fp16_path
 
 
 @torch.no_grad()
-def compare_int8_accuracy(
+def compare_fp16_accuracy(
     fp32_path: Path,
-    int8_path: Path,
+    fp16_path: Path,
     loader: DataLoader,
     temperature: float,
+    threshold: float | None,
 ) -> dict | None:
-    """Re-evaluate the quantised graph on the held-out set.
+    """Re-evaluate the fp16 graph on the held-out set before shipping it.
 
-    This is the check that decides whether INT8 is shippable. MobileNetV3's
-    hard-swish and squeeze-excite blocks are known to quantise badly, and the
-    failure is silent -- the model keeps working, just worse. Measuring beats
-    assuming.
+    INT8 taught this lesson expensively: a reduced-precision graph fails
+    silently, staying loadable and plausible while classifying at chance. So the
+    smaller model is measured, never assumed, and export falls back to fp32 if it
+    does not survive.
+
+    Abstain agreement is checked alongside accuracy because the client thresholds
+    on a calibrated probability, not an argmax. A variant could preserve every
+    prediction while nudging probabilities across the 0.72 threshold, changing
+    which images return "not sure" -- invisible to an accuracy check, but
+    visible to a field user.
     """
     try:
         import onnxruntime as rt
@@ -713,37 +748,49 @@ def compare_int8_accuracy(
 
     sessions = {
         tag: rt.InferenceSession(str(p), providers=["CPUExecutionProvider"])
-        for tag, p in (("fp32", fp32_path), ("int8", int8_path))
+        for tag, p in (("fp32", fp32_path), ("fp16", fp16_path))
     }
 
-    correct = {"fp32": 0, "int8": 0}
-    agree = 0
-    total = 0
+    correct = {"fp32": 0, "fp16": 0}
+    agree = abstain_agree = total = 0
     for x, y in loader:
         batch = x.numpy()
-        preds = {}
+        preds, confs = {}, {}
         for tag, sess in sessions.items():
             logits = sess.run(None, {sess.get_inputs()[0].name: batch})[0]
-            preds[tag] = logits.argmax(axis=1)
+            z = logits / temperature
+            z = z - z.max(axis=1, keepdims=True)
+            e = np.exp(z)
+            probs = e / e.sum(axis=1, keepdims=True)
+            preds[tag] = probs.argmax(axis=1)
+            confs[tag] = probs.max(axis=1)
             correct[tag] += int((preds[tag] == y.numpy()).sum())
-        agree += int((preds["fp32"] == preds["int8"]).sum())
+        agree += int((preds["fp32"] == preds["fp16"]).sum())
+        if threshold is not None:
+            abstain_agree += int(
+                ((confs["fp32"] >= threshold) == (confs["fp16"] >= threshold)).sum()
+            )
         total += len(y)
 
     result = {
         "fp32_accuracy": correct["fp32"] / total,
-        "int8_accuracy": correct["int8"] / total,
+        "fp16_accuracy": correct["fp16"] / total,
         "agreement": agree / total,
+        **({"abstain_agreement": abstain_agree / total} if threshold is not None else {}),
     }
-    delta = result["int8_accuracy"] - result["fp32_accuracy"]
+    delta = result["fp16_accuracy"] - result["fp32_accuracy"]
     print(
-        f"\nINT8 accuracy check ({total} held-out images):\n"
-        f"  fp32 {result['fp32_accuracy']:.4f}   int8 {result['int8_accuracy']:.4f}"
+        f"\nfp16 accuracy check ({total} held-out images):\n"
+        f"  fp32 {result['fp32_accuracy']:.4f}   fp16 {result['fp16_accuracy']:.4f}"
         f"   delta {delta:+.4f}   agreement {result['agreement']:.4f}"
     )
-    if delta < -0.02:
+    if "abstain_agreement" in result:
+        print(f"  abstain agreement {result['abstain_agreement']:.4f}")
+    if delta < -0.005:
         print(
-            "  WARNING: INT8 costs >2 points of accuracy. MobileNetV3 hard-swish and\n"
-            "  squeeze-excite quantise poorly -- consider efficientnet_lite0 or QAT."
+            "  WARNING: fp16 costs accuracy, which it should not -- it preserves the\n"
+            "  dynamic range that INT8 lost. Suspect the op_block_list or a genuinely\n"
+            "  overflowing activation. Run src/compare_fp16.py to investigate."
         )
     return result
 
@@ -757,18 +804,16 @@ def export_mobile(
     threshold: float | None,
     test_loader: DataLoader | None = None,
 ) -> None:
-    """Export ONNX (fp32 and INT8) for browser and mobile deployment.
+    """Export ONNX (fp32 and fp16) for browser and mobile deployment.
 
-    INT8 is the shipping artefact: 5.79 MB -> 1.58 MB, and 1.27 MB gzipped, which
-    matters on a rural connection. It is measurably *slower* per inference than
-    fp32 on a small model like this -- dynamic quantisation adds quantise and
-    dequantise nodes that cost more than the arithmetic they save -- but both are
-    milliseconds, so size wins. See docs/model-size.md.
+    fp16 is the shipping artefact: 5.81 MB -> 2.94 MB, and 2.69 MB gzipped, which
+    matters on a rural connection. Measured on this model it costs nothing --
+    identical accuracy and per-class F1, 100% prediction agreement with fp32.
 
-    Watch INT8 accuracy: MobileNetV3's hard-swish and squeeze-excite blocks
-    quantise poorly. The accuracy delta is reported below; if it is material,
-    switch to efficientnet_lite0 (built without those ops) or use
-    quantisation-aware training. Verify -- do not assume it survived.
+    It is shipped only if it survives the check below. INT8 previously collapsed
+    to near chance here while still loading and running normally, so the
+    reduced-precision graph is always re-evaluated on held-out data and fp32
+    ships instead if it fails. See docs/model-size.md.
     """
     model.eval().to("cpu")
     onnx_path = out_dir / "mobilenetv3_small_plants.onnx"
@@ -788,26 +833,30 @@ def export_mobile(
     )
     (out_dir / "labels.txt").write_text("\n".join(classes) + "\n")
 
-    int8_path = quantize_int8(onnx_path)
+    fp16_path = convert_fp16(onnx_path)
 
-    quant = None
+    precision = None
     ship_path = onnx_path
-    if int8_path and test_loader is not None:
-        quant = compare_int8_accuracy(onnx_path, int8_path, test_loader, temperature)
-        # Only ship INT8 if it actually survived. On this model every INT8
-        # strategy collapsed to near chance (0.88 -> 0.26) because hard-swish
-        # activation outliers dominate the per-tensor scale -- see
-        # docs/model-size.md. Shipping a 4x smaller model that cannot classify
-        # is not a size win.
-        if quant and quant["int8_accuracy"] >= quant["fp32_accuracy"] - 0.02:
-            ship_path = int8_path
+    if fp16_path and test_loader is not None:
+        precision = compare_fp16_accuracy(
+            onnx_path, fp16_path, test_loader, temperature, threshold
+        )
+        # Ship the smaller graph only if it actually survived. INT8 did not --
+        # it collapsed from 0.88 to 0.26 while still loading and running
+        # normally. fp16 is expected to pass comfortably (measured: zero
+        # accuracy delta), so a failure here means something is wrong, not that
+        # a trade-off needs weighing.
+        if precision and precision["fp16_accuracy"] >= precision["fp32_accuracy"] - 0.005:
+            ship_path = fp16_path
         else:
             print(
-                "\nShipping fp32: INT8 did not survive quantisation.\n"
-                "Run src/compare_quantization.py to explore alternatives."
+                "\nShipping fp32: fp16 did not survive conversion.\n"
+                "Run src/compare_fp16.py to investigate."
             )
-    elif int8_path:
-        ship_path = int8_path
+    elif fp16_path:
+        # No held-out loader to verify against. fp32 ships: an unverified
+        # reduced-precision graph is exactly what the INT8 failure looked like.
+        print("\nShipping fp32: no test loader, so fp16 could not be verified.")
 
     # The client cannot abstain without these. Shipping the model without the
     # temperature and threshold means shipping raw overconfident softmax, which
@@ -818,9 +867,9 @@ def export_mobile(
                 "classes": classes,
                 "input_size": IMG_SIZE,
                 # Whichever variant passed the accuracy check. The client loads
-                # this name, so a failed quantisation cannot silently ship.
+                # this name, so a failed conversion cannot silently ship.
                 "model_file": ship_path.name,
-                "quantization": "int8_dynamic" if ship_path is int8_path else "none",
+                "precision": "fp16" if ship_path is fp16_path else "fp32",
                 "preprocessing": {
                     "resize": int(IMG_SIZE * 1.14),
                     "center_crop": IMG_SIZE,
@@ -830,7 +879,7 @@ def export_mobile(
                 "temperature": temperature,
                 "abstain_threshold": threshold,
                 "abstain_supported": threshold is not None,
-                **({"int8_vs_fp32": quant} if quant else {}),
+                **({"fp16_vs_fp32": precision} if precision else {}),
             },
             indent=2,
         )

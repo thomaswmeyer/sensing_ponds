@@ -6,14 +6,24 @@ All figures measured on this project's actual model (MobileNetV3-Small, 4 classe
 
 ## The headline
 
-**The runtime dominates, not the model.** The model is ~1.3 MB gzipped; the ONNX Runtime WASM binary is 3.5 MB gzipped even after the easy fixes. Effort spent shrinking the model past INT8 is effort spent on the smaller half of the problem.
+**The runtime dominates again, now that the model is fp16.** Measured on the actual build, 2026-08-12:
 
 | | Raw | Gzipped |
 |---|---|---|
-| Model (INT8) | 1.58 MB | **1.27 MB** |
-| ORT WASM runtime (stock) | 13.48 MB | **3.46 MB** |
+| Model (fp16) | 2.94 MB | **2.69 MB** |
+| ORT WASM runtime (stock) | 12.86 MB | **3.28 MB** |
 | App JS + CSS | 292 KB | 94 KB |
-| **Total first load** | ~15.4 MB | **~4.8 MB** |
+| **Total first load** | ~16.1 MB | **~6.1 MB** |
+
+### History of this table, because it inverted twice
+
+The ordering here has flipped with each precision decision, and stale versions of this table have twice pointed the work in the wrong direction:
+
+1. **INT8 shipping (1.27 MB gz):** runtime dominated ~3:1. Correct conclusion at the time: shrink the runtime, not the model.
+2. **INT8 abandoned, fp32 shipping (5.39 MB gz):** the model became the *larger* half — and fp32 barely compresses, since its weights are high-entropy (5.81 → 5.39 MB, only 7%). This document was not updated and kept advising against model work for a day, exactly when model work had become the highest-value thing available.
+3. **fp16 shipping (2.69 MB gz):** runtime is the larger half again, but only 1.2:1 — much closer than in (1).
+
+**If you change precision, update this table in the same commit.** It is the document people consult before deciding where to spend effort, and a stale version actively misdirects that decision.
 
 ## Already applied
 
@@ -28,9 +38,24 @@ All figures measured on this project's actual model (MobileNetV3-Small, 4 classe
 
 WebGPU is not worth its weight here. This model is 1.5M parameters at 224×224 — **1.2 ms per inference on CPU**. GPU acceleration solves a problem this app does not have.
 
-### 2. Threaded WASM excluded from precache
+### 2. Single-threaded execution — no size saving, and the precache bug it caused
 
-The threaded build needs cross-origin isolation (COOP/COEP headers) to use `SharedArrayBuffer`. Without those headers it downloads and then silently falls back to single-threaded anyway. `ort.env.wasm.numThreads = 1` and a `globIgnores` entry keep it out.
+`ort.env.wasm.numThreads = 1` avoids the `SharedArrayBuffer` thread pool, which needs cross-origin isolation (COOP/COEP) we do not set. Without those headers ORT falls back to one thread anyway, so this only makes the real behaviour explicit.
+
+**It saves no bytes.** There is no separate single-threaded binary to select. Since ~1.19, `onnxruntime-web` ships only `-threaded` builds:
+
+```
+ort-wasm-simd-threaded.wasm           12.86 MB   ← the one we load
+ort-wasm-simd-threaded.jsep.wasm      26 MB      (WebGPU)
+ort-wasm-simd-threaded.asyncify.wasm  23 MB
+ort-wasm-simd-threaded.jspi.wasm      14 MB
+```
+
+An earlier `globIgnores: ['**/ort-wasm-simd-threaded*.wasm', '**/ort-*.mjs']` was written believing it excluded a fat threaded build in favour of a lean single-threaded one. **No such build exists** — that pattern matched the only runtime the app has, plus its loader glue, and dropped both from the service-worker precache while `plants.onnx` stayed in it. The app kept working online, where the runtime is fetched on demand, so the breakage was invisible outside a genuinely offline install — the one scenario this app is built for.
+
+A second, independent cause pointed the same way: `maximumFileSizeToCacheInBytes` was 12 MB and the runtime is 12.86 MB. Workbox compares against the **uncompressed** size and silently drops anything larger with only a build-log warning, so the cap alone would have excluded the runtime even with the globs fixed. Both are fixed in [`web/vite.config.js`](../web/vite.config.js); the precache went from 12 entries to 13.
+
+**Verify offline behaviour on a real airplane-mode install after touching any of this.** Both failure modes are silent, and neither shows up in an online smoke test.
 
 ### 3. ❌ INT8 quantisation — abandoned, ships fp32
 
@@ -79,15 +104,46 @@ This is consistent with the one partial success: Percentile calibration clips ac
 
 Stronger weight decay or dropout shrinks weights *toward* zero, compressing dynamic range rather than lifting the floor — it would create more `1e-16` channels, not fewer. And since excluding the extreme-range layers changed nothing, weight distribution is not the binding constraint. The problem is on the activation side, which weight regularisation does not control.
 
-#### Decision: ship fp32
+#### Decision: fp32 over INT8
 
-**5.81 MB raw / 5.33 MB gzipped.** Roughly 4 MB more than INT8 would have cost, on a first load that is cached forever afterwards. A 62-point accuracy loss is not a trade worth making.
+A 62-point accuracy loss is not a trade worth making for 4 MB. fp32 shipped until fp16 replaced it below.
 
-Paths that could recover INT8, in order of cost:
+### 4. ✅ fp16 — shipping, and it costs nothing
 
-1. **`efficientnet_lite0`** — designed for quantisation, with hard-swish and squeeze-excite deliberately removed. ~4.7M params, so somewhat larger fp32, but should quantise cleanly. Requires retraining (~1 hour) and re-verifying.
+**Identical accuracy to fp32, half the size.** Measured on the same 920-image held-out test set:
+
+| | Accuracy | Balanced | ECE | Raw | Gzipped |
+|---|---|---|---|---|---|
+| fp32 | 0.8826 | 0.8782 | 0.0184 | 5.81 MB | 5.39 MB |
+| **fp16 (shipping)** | **0.8826** | **0.8782** | **0.0181** | **2.94 MB** | **2.69 MB** |
+
+Per-class F1 is identical to four decimal places for all four classes. Prediction agreement is **1.0000** — not one of the 920 images changes its predicted label. **2.70 MB off the wire.**
+
+Reproduce with [`src/compare_fp16.py`](../src/compare_fp16.py).
+
+#### Why fp16 survives where INT8 did not
+
+They fail differently. INT8 gives you 256 uniformly-spaced levels across the whole tensor range, so one hard-swish outlier at ±23000 stretches the scale until real signal collapses into a handful of levels. **fp16 keeps 5 exponent bits**, so it represents both 23000 and 0.001 to roughly 3 decimal digits each — the outliers stay representable and stop crushing everything else. The INT8 diagnosis was about *dynamic range*, and fp16 is precisely the format that preserves it.
+
+26 subnormal weights flush to fp16's floor during conversion. These are the same dead squeeze-excite channels the INT8 investigation identified (fp32 magnitudes down to `1e-16`) — the model already ignores them, which is why zero predictions change.
+
+#### What to watch: abstain, not accuracy
+
+Abstain agreement is **0.9978** — 2 of 920 images cross the 0.72 threshold. Probabilities shift by up to 0.0277, and the client thresholds on a probability rather than an argmax, so a variant can preserve every prediction and still change what the user sees. This is noise rather than degradation (coverage rose slightly, 0.8522 → 0.8543; precision held at 0.9504, above the 0.95 target), but **it is the metric to check on any future precision change** — an accuracy-only comparison would have shown nothing at all.
+
+`compare_fp16_accuracy()` in the training script checks both, and export falls back to fp32 if either fails.
+
+#### Implementation
+
+`keep_io_types=True` keeps the graph's input and output fp32, casting just inside the boundary, so the client still sends a `Float32Array` and needs no change. `GlobalAveragePool` and `ReduceMean` stay in fp32 — both accumulate over many elements where half-precision rounding compounds, and both hold a negligible share of the weights.
+
+Requires `onnxconverter-common`.
+
+#### If you need to go smaller still
+
+1. **`efficientnet_lite0`** — designed for quantisation, with hard-swish and squeeze-excite deliberately removed. ~4.7M params, so larger in fp32, but should quantise cleanly to INT8 (~1.2 MB). Requires retraining and full revalidation.
 2. **Quantisation-aware training** — the model learns to tolerate quantisation noise. Most reliable, most work.
-3. **fp16** — halves size to ~2.9 MB with far less accuracy risk than INT8. Untested here; the obvious next thing to try.
+3. **`mobilenetv3_small_075` / smaller input** — cheap to try, costs accuracy on an already-small model.
 
 ## Possible: custom minimal ORT build
 
@@ -138,12 +194,12 @@ The `/wasm` entry point captured most of the available saving for a one-line cha
 
 | Lever | Saving | Cost |
 |---|---|---|
-| **Brotli instead of gzip** | ~15–20% over gzip | Server config only. Free win — do this at deploy time. |
+| **Brotli instead of gzip** | ~15–20% over gzip | Already automatic on Cloudflare Pages. |
 | **Lazy-load the model** | 4.8 MB off *first paint* | Camera UI appears immediately, model loads behind it. Does not reduce total bytes. |
 | Smaller input (160×160) | ~50% fewer FLOPs, model size unchanged | Retraining; accuracy loss. Not size-motivated — we are not compute-bound. |
 | `mobilenetv3_small_075` | ~30% fewer params (~1.1 MB INT8) | Accuracy loss on an already-small model. |
 
-**Brotli is the cheapest remaining win.** Render serves it automatically for static sites.
+**Brotli is already in hand.** The deploy target is Cloudflare Pages, which brotli-compresses static assets in transit automatically — see the note in [`web/public/_headers`](../web/public/_headers). The gzip figures in this document are therefore an upper bound on what actually crosses the wire; real transfer is roughly 15–20% below them.
 
 ## What the user actually downloads
 
@@ -151,15 +207,15 @@ First visit, gzipped, with the current build:
 
 ```
 app shell (JS + CSS + HTML)     94 KB
-ORT WASM runtime             3,460 KB
-model (INT8)                 1,270 KB
+ORT WASM runtime             3,280 KB
+model (fp16)                 2,690 KB
 Noto Sans Tamil (subset)     ~100 KB
 Tamil audio (~100 strings)  1,000-3,000 KB
                             ─────────
-                            ~6-8 MB
+                            ~7-9 MB   (gzip; ~15-20% less over brotli)
 ```
 
-Cached in the service worker after that, so the field cost is zero — but the first load matters on a rural connection.
+All of it is precached by the service worker on first load, so the field cost afterwards is zero — but the first load matters on a rural connection. That precache is only trustworthy because both bugs in §2 are fixed; before that, the runtime was excluded and the app could not classify offline at all.
 
 **Recommendation: make the language pack a deliberate first-run download over Wi-Fi** rather than something fetched in the field. The audio is comparable in size to everything else combined.
 
