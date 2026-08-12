@@ -34,8 +34,11 @@ web/dist/
 web/dev-dist/
 
 # Large binary assets fetched separately -- see web/ASSETS-NEEDED.md
-web/public/fonts/*.woff2
 web/public/audio/
+
+# The web fonts ARE tracked. They are build products of tools/build_fonts.py,
+# but 42 KB each and required for Tamil to render at all, so a clean checkout
+# should build a working app without a separate asset-fetching step.
 
 # ...but the deployed classifier IS tracked, via LFS. Deployment builds from a
 # clean checkout, so an untracked model means shipping a site whose only
