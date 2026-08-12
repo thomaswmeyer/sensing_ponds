@@ -34,15 +34,24 @@ glyphs are present but never combine.
 
 Re-run after adding a locale that needs other codepoints.
 
-## `audio/ta/*.opus`
+## `audio/ta/*.opus` — the remaining blocker
 
-**Blocks: use by non-literate users.** Roughly 60–100 fixed strings, recorded
-with a native Tamil speaker.
+**Blocks: use by non-literate users.** Roughly 60–100 fixed strings.
 
 This is the primary voice path, not a fallback. Chrome on Android silently
 substitutes an English voice when the Tamil voice pack is absent, which would
 read Tamil aloud in English phonetics to someone who cannot see that it is
-wrong.
+wrong. Device TTS cannot carry this — Tamil is an on-demand download needing
+connectivity, and Samsung's engine has no Tamil pack at all. See
+[architecture.md](../docs/architecture.md#speech-synthesis).
+
+These do not require a studio. Generate them at build time with AI4Bharat
+`vits_rasa_13` (CC-BY-4.0, Tamil `TAM_F`) or a paid API, then
+`ffmpeg -c:a libopus -b:a 24k -ac 1`. ~100 clips lands under 2 MB.
+
+**But a native Tamil speaker must listen to every clip before field use.**
+Indic TTS mispronounces plant names, place names and numerals — precisely the
+strings this app turns on — and a non-literate user cannot detect the error.
 
 File names match string IDs: `audio/ta/species.water_hyacinth.opus`. Register
 each recorded ID in `RECORDED_AUDIO` in `src/i18n/strings.js` — an unregistered

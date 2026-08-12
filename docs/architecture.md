@@ -267,9 +267,46 @@ Two-tier approach:
    const hasTamil = speechSynthesis.getVoices()
      .some(v => v.lang.startsWith('ta') && v.localService);
    ```
-   Treat a missing voice as "no audio available", never as "use whatever voice is default". If offline neural TTS becomes necessary, [Piper](https://huggingface.co/datasets/Jeyaram-K/piper-tamil-voice) has a Tamil model (`ta_IN-Valluvar-medium.onnx`) and [AI4Bharat Indic-TTS](https://github.com/AI4Bharat/Indic-TTS) covers 13 Indian languages — but both add tens of MB to a bundle that is currently ~2 MB, so only take this on if pre-recorded audio proves insufficient.
+   Treat a missing voice as "no audio available", never as "use whatever voice is default".
 
 Design the app so **almost nothing needs dynamic TTS.** If the entire interface is a fixed vocabulary, tier 1 covers it and tier 2 never ships.
+
+#### Why device TTS cannot be the delivery mechanism
+
+Researched 2026-08-12. Two corrections to what this document previously assumed:
+
+- **The detection snippet above cannot be trusted on the platform that matters.**
+  Chrome on Android lists `ta-IN` whether or not the voice pack is installed, so
+  the check can return a voice that does not exist and then read Tamil in English
+  phonetics. `localService` does not save it, and Safari reports `default: true`
+  for every voice. There is no reliable client-side probe — synthesis exposes no
+  audio buffer to inspect, and the substituted voice reports success. The only
+  trustworthy signal is a human listening.
+- **Tamil TTS is not present by default on phones sold in Tamil Nadu.** Google's
+  engine treats Tamil as an on-demand download requiring connectivity, which the
+  field does not have. Samsung's TTS engine — the default on many Galaxy devices
+  — has no Tamil voice pack at all, so it fails even when online. India's IS 16333
+  (Part 3) mandates Indic *display and input*, not speech, so no regulation
+  guarantees a floor. Even once installed, Google's higher-quality Tamil voice is
+  network-backed and silently degrades or fails offline.
+
+**Piper has no Tamil voice** — the earlier reference here was wrong; `piper-voices`
+covers bn/hi/ml/mr/ne/te/ur but not `ta`. Every genuinely bundleable Tamil model is
+114 MB+ (MMS Tamil ONNX is 114 MB and CC-BY-NC, which also blocks commercial use),
+against a current payload of ~19 MB. The only sub-10 MB option is eSpeak-ng, whose
+robotic formant output is a poor fit for users who cannot fall back on reading.
+
+So: **generate the tier-1 clips at build time rather than bundling a model or
+trusting the device.** ~100 clips at 24 kbps mono Opus is well under 2 MB.
+[AI4Bharat `vits_rasa_13`](https://huggingface.co/ai4bharat/vits_rasa_13) (CC-BY-4.0,
+Tamil `TAM_F`, HF access is gated) runs on CPU at build time; `IndicF5` (MIT) and
+`indic-parler-tts` (Apache-2.0) are larger but size is irrelevant offline. Sarvam's
+Bulbul is a paid alternative that models Dravidian syllable timing, costing under
+₹100 for the whole string set.
+
+**A native Tamil speaker must review every generated clip before field use.** Indic
+TTS reliably mispronounces exactly what this app depends on — plant names, local
+place names, numerals — and a non-literate user has no way to detect the error.
 
 ### Designing for non-literate users
 
