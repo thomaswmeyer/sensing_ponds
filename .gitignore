@@ -26,6 +26,14 @@ node_modules/
 dist/
 .vite/
 
+# Secrets. The Cloudflare deploy credentials live in web/.env, which wrangler
+# reads directly -- CLOUDFLARE_API_TOKEN grants Pages:Edit across the whole
+# account, so a commit here is an account-scoped leak, not a project one. The
+# example file is the committed one and must hold placeholders only.
+.env
+.env.*
+!.env.example
+
 # macOS
 .DS_Store
 
