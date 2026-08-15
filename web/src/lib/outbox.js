@@ -9,6 +9,12 @@
  * lost response must not create a duplicate row server-side.
  */
 
+// Do NOT rename to match the app. This is the IndexedDB database name, not a
+// label: renaming it points the app at a fresh, empty database and strands
+// every queued observation in the old one. The outbox would read as empty while
+// unsent captures sit in an abandoned database the app no longer opens -- the
+// worst failure available to an offline-first queue, and a silent one. The
+// 'pondy' spelling predates the rename to Sensing Ponds and stays deliberately.
 const DB_NAME = 'pondy'
 const DB_VERSION = 1
 const STORE = 'outbox'

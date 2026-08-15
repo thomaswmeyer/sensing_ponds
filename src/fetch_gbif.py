@@ -91,7 +91,7 @@ IMAGE_EXT_RE = re.compile(r"\.(jpe?g|png|webp)(\?|$)", re.I)
 
 
 CURL = shutil.which("curl")
-UA = "sensing-pondy/0.1"
+UA = "sensing-ponds/0.1"
 
 
 def _curl(url: str, timeout: int, binary: bool) -> bytes:

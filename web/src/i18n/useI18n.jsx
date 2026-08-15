@@ -1,6 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { DEFAULT_LOCALE, LOCALES, STRINGS } from './strings.js'
 
+// Do NOT rename to match the app. This is a localStorage key, not a label:
+// renaming it discards every saved language preference and drops users back to
+// the default. The 'pondy' spelling predates the rename to Sensing Ponds and
+// stays deliberately.
 const STORAGE_KEY = 'pondy.locale'
 const I18nContext = createContext(null)
 
