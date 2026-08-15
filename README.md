@@ -1,4 +1,4 @@
-# sensing_pondy
+# Sensing Ponds
 
 Remote sensing and computer vision for water hyacinth coverage and water quality monitoring.
 
@@ -6,7 +6,7 @@ Remote sensing and computer vision for water hyacinth coverage and water quality
 
 A Tamil-first mobile web app that identifies floating aquatic plants on-device from a phone photo, tells the user what the plant can be used for, and contributes each observation — photo, GPS, timestamp, prediction — to a growing ground-truth dataset for later human validation.
 
-Classifier training is implemented in [src/train_mobile_classifier.py](src/train_mobile_classifier.py). The capture app is designed in [docs/architecture.md](docs/architecture.md) but not yet built.
+Classifier training is implemented in [src/train_mobile_classifier.py](src/train_mobile_classifier.py). The capture app is built and deployed; the upload API and validation loop in [docs/architecture.md](docs/architecture.md) are still design documents.
 
 **Classes:** water hyacinth, water lettuce, duckweed, *Salvinia molesta* — plus an explicit *abstain* output for anything else.
 
@@ -48,8 +48,12 @@ Outputs to `runs/mobile-classifier/`: checkpoint, `metrics.json`, ONNX, `labels.
 
 ## Status
 
-**Not yet run.** The environment is set up (torch 2.13, timm 1.0.28, MPS available) and the Mendeley data is in place, but training has not been executed and the GBIF download is incomplete. The reworked split and discovery code is syntax-checked, not tested.
+**Trained and deployed** to <https://sensing-ponds.pages.dev>.
 
-The web client is scaffolding only — `web/package.json` and nothing else.
+88.3% accuracy / 87.8% balanced on the 920-image held-out test set, per-class F1 0.85–0.91, ECE 0.018 after temperature scaling. The abstain threshold of 0.72 reaches the 95% precision target on 85.2% of images; the rest return "not sure". Ships as fp16 at 2.94 MB — INT8 was measured and abandoned, see [docs/model-size.md](docs/model-size.md).
 
-Everything in `docs/` is a design document. No accuracy figure in this repo has been measured.
+What is *not* done:
+
+- **No field testing.** Every number above comes from citizen-science photographs. None comes from a phone held over a real pond, which is the only test that decides whether this works. The regional subset scores 94.7% — *above* the headline — which says those GBIF images are easier, not that the model transfers.
+- **No Tamil audio.** `RECORDED_AUDIO` is empty. The voice path is the primary interface for non-literate users, not a fallback — see [web/ASSETS-NEEDED.md](web/ASSETS-NEEDED.md).
+- **No backend.** Observations queue in IndexedDB via the outbox and are never uploaded, because there is nowhere to upload them. `COLLECT_POSITION` is `false` for the same reason: the app does not ask for a location it cannot yet do anything with.
