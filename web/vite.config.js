@@ -59,9 +59,15 @@ export default defineConfig({
         // from start_url, so ever changing start_url would orphan every existing
         // install and reinstall as a separate app. Cheap to set now while there
         // are no installs; impossible to change later without breaking them.
+        //
+        // Deliberately still says 'pondy-plant-id' after the app was renamed to
+        // Sensing Ponds. `id` is an opaque identity key the user never sees, and
+        // changing it would orphan every install to no visible benefit -- the
+        // rename lives in `name` and `short_name` below, which are what people
+        // actually read.
         id: '/?app=pondy-plant-id',
-        name: 'Pondy Plant ID',
-        short_name: 'Plant ID',
+        name: 'Sensing Ponds',
+        short_name: 'Sensing Ponds',
         description: 'Identify floating water plants and record where they grow',
         lang: 'ta',
         start_url: '/',

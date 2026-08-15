@@ -85,7 +85,7 @@ const ta = {
 }
 
 const en = {
-  'app.name': 'Plant ID',
+  'app.name': 'Sensing Ponds',
   'app.tagline': 'Identify floating water plants',
 
   'action.capture': 'Take photo',
