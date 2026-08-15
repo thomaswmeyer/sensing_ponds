@@ -37,11 +37,23 @@ Two things must therefore stay in step, or the saving silently evaporates:
 
 ## Build
 
+> ### 🚨 This build does not currently run
+>
+> `--enable_runtime_optimizations` in the Dockerfile **is not a real `build.py` flag** in ORT v1.27.0. The build fails in seconds:
+>
+> ```
+> build.py: error: unrecognized arguments: --enable_runtime_optimizations
+> ```
+>
+> The requirement is real and measured — see [the fp16 trap](#the-fp16-trap-ort-conversion-can-undo-the-model-saving) — but the correct spelling is unknown. **Next step:** read `tools/ci_build/build.py` in the v1.27.0 tree and find the real flag (likely a `--minimal_build` sub-option, or something naming "saving runtime optimizations"), then fix the Dockerfile and rerun.
+>
+> Everything else here — the op config, the version pin, the `.ort` conversion — is correct and verified. No custom WASM exists yet, so the app still loads the stock 12.86 MB runtime.
+
 ```bash
 docker build --platform linux/amd64 -t ort-minimal:v1.27.0 tools/ort-minimal
 ```
 
-**1–3 hours on first run.** It compiles emsdk, protobuf and ORT itself. Docker layer caching makes subsequent builds fast unless the config changes.
+**1–3 hours on first run** once the flag is fixed. It compiles emsdk, protobuf and ORT itself. Docker layer caching makes subsequent builds fast unless the config changes — the ORT clone alone takes ~5 minutes and is already cached.
 
 Extract the artefacts:
 

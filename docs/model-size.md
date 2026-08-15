@@ -147,7 +147,9 @@ Requires `onnxconverter-common`.
 
 ## In progress: custom minimal ORT build
 
-Now the largest remaining item. With the model at 2.69 MB gzipped, the 3.28 MB runtime is the bigger half of the payload again, and the precondition for this work — a settled architecture — is finally met.
+**Status: blocked, and nothing is shipping from it yet.** The Docker build fails immediately because `--enable_runtime_optimizations` is not a real `build.py` flag in ORT v1.27.0; the correct spelling still has to be found in `tools/ci_build/build.py`. The op config, version pin and `.ort` conversion are all verified — only the build invocation is wrong. See [`tools/ort-minimal/README.md`](../tools/ort-minimal/README.md).
+
+This is the largest remaining item. With the model at 2.69 MB gzipped, the 3.28 MB runtime is the bigger half of the payload again, and the precondition for this work — a settled architecture — is finally met.
 
 **The fp16 model needs 5 operator groups.** The stock runtime carries several hundred kernels across all supported types:
 

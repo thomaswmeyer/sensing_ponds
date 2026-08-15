@@ -52,12 +52,26 @@ COPY --chown=builder:builder required_operators_and_types.config /src/ops.config
 
 WORKDIR /src/onnxruntime
 
+# !!! THIS BUILD DOES NOT CURRENTLY RUN !!!
+#
+#     `--enable_runtime_optimizations` below is NOT a real build.py flag in ORT
+#     v1.27.0. The build fails in seconds with:
+#
+#         build.py: error: unrecognized arguments: --enable_runtime_optimizations
+#
+#     The requirement it expresses is real and measured (see below) -- what is
+#     unknown is how to ask build.py for it. Someone must check
+#     tools/ci_build/build.py in the v1.27.0 tree for the actual spelling
+#     (candidates: a --minimal_build sub-option, or a flag around
+#     "saving runtime optimizations"), fix the line, and rerun. Until then no
+#     custom WASM exists and the app still loads the stock 12.86 MB runtime.
+#
 # --minimal_build extended:
 #     Drops the ONNX format parser and the full optimiser set. Requires .ort
 #     format models, which is why the export step must emit one.
-# --enable_runtime_optimizations:
-#     REQUIRED, and not merely a tuning knob -- without it this build throws
-#     away the entire fp16 saving.
+# --enable_runtime_optimizations:   <-- WRONG FLAG NAME, see above
+#     REQUIRED in intent, and not merely a tuning knob -- without runtime
+#     optimisations this build throws away the entire fp16 saving.
 #
 #     ORT's CPU execution provider has no fp16 kernels, so it upcasts every
 #     fp16 initialiser to float32 during graph optimisation. On the normal
