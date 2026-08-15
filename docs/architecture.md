@@ -4,7 +4,15 @@ A mobile web app that identifies floating aquatic plants on-device and contribut
 
 Status: **design, not built.** Nothing in this document has been implemented. Decisions marked ⚠️ are ones I made without confirmation — see [Decisions taken](#decisions-taken-without-confirmation) before building.
 
-Related: [classifier-options.md](classifier-options.md) · [datasets.md](datasets.md)
+Related: [classifier-options.md](classifier-options.md) · [datasets.md](datasets.md) · [backend-cloudflare.md](backend-cloudflare.md)
+
+> **The server design below is superseded but not yet replaced.** Fastify +
+> Postgres/PostGIS + S3 still describes the intent, but the free-Postgres expiry
+> flagged in [Free Postgres expires after 30 days](#️-free-postgres-expires-after-30-days)
+> rules that hosting out. [backend-cloudflare.md](backend-cloudflare.md) works the
+> same requirements through Workers + R2 + D1 on the free tier, and revisits two
+> decisions taken here: the presigned two-step upload, and PostGIS.
+> No decision has been taken between them.
 
 ## What this is for
 
