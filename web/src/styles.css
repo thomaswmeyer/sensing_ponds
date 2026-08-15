@@ -230,10 +230,34 @@ body {
   overflow-y: auto;
 }
 
+.result__photo {
+  position: relative;
+}
+
 .result__photo img {
+  display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
   object-fit: cover;
+}
+
+/* Retake overlays the photo it undoes. Anchored bottom-right: the subject is
+   normally framed centre and up, and this is where a thumb already rests.
+   Not width-constrained beyond the photo -- the Tamil label is far longer than
+   "Retake" and must be allowed to wrap rather than truncate. */
+.result__retake {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  max-width: calc(100% - 24px);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  /* The photo behind is arbitrary -- bright sky, dark water, anything. A solid
+     fill plus a shadow keeps the label legible over all of it, which a
+     translucent scrim would not. */
+  background: var(--surface);
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.5);
 }
 
 .result__body {

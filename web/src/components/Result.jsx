@@ -34,6 +34,14 @@ export default function Result({ result, imageUrl, onRetake, extent, onExtentCha
     <div className={`result result--${band}`}>
       <div className="result__photo">
         <img src={imageUrl} alt="" />
+        {/* Retake belongs on the photo, not at the end of the page. The photo is
+            what tells the user the shot was wrong -- blurred, too far, the wrong
+            plant -- so the correction has to be reachable while that is on
+            screen, rather than below the uses and the extent question where it
+            needs a scroll the user has no reason to make. */}
+        <button type="button" className="btn btn--ghost result__retake" onClick={onRetake}>
+          {t('action.retake')}
+        </button>
       </div>
 
       <div className="result__body">
@@ -88,10 +96,6 @@ export default function Result({ result, imageUrl, onRetake, extent, onExtentCha
         )}
 
         <ExtentPicker value={extent} onChange={onExtentChange} />
-
-        <button type="button" className="btn btn--ghost" onClick={onRetake}>
-          {t('action.retake')}
-        </button>
       </div>
     </div>
   )
